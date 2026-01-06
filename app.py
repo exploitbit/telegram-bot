@@ -17,7 +17,7 @@ from werkzeug.utils import secure_filename
 # Get from Railway Environment Variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8295150408:AAF1P_IcRG-z8L54PNzZVFKNXts0Uwy0TtY')
 ADMIN_ID = os.environ.get('ADMIN_ID', '8435248854')
-BASE_URL = os.environ.get('BASE_URL', 'https://web-production-7f83a.up.railway.app')
+BASE_URL = os.environ.get('BASE_URL', 'https://flask-production-04ac.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
 
 # Directory Paths
@@ -193,6 +193,15 @@ def check_gift_code_expiry():
         save_json(GIFTS_FILE, gifts)
     return gifts
 
+# Custom Jinja2 filter for datetime parsing
+def datetime_from_isoformat(value):
+    try:
+        return datetime.fromisoformat(value)
+    except:
+        return datetime.now()
+
+app.jinja_env.filters['fromisoformat'] = datetime_from_isoformat
+
 # ==================== 4. BOT HANDLERS ====================
 @bot.chat_join_request_handler()
 def auto_approve(message):
@@ -361,6 +370,11 @@ def api_verify():
         if uid not in users:
             return jsonify({'ok': False, 'msg': 'User not found'})
         
+        # Check if already verified
+        if users[uid].get('verified'):
+            return jsonify({'ok': True, 'msg': 'Already verified'})
+        
+        # Check channel membership
         if settings['channels']:
             missing = []
             for ch in settings['channels']:
@@ -375,73 +389,71 @@ def api_verify():
             if missing: 
                 return jsonify({'ok': False, 'msg': f"Please join: {', '.join(missing)}"})
 
-        if not users[uid].get('verified'):
-            if not settings.get('ignore_device_check', False):
-                for u_id, u_data in users.items():
-                    if u_id == uid: 
-                        continue
-                    if u_data.get('verified') and str(u_data.get('device_id', '')) == fp:
-                        return jsonify({'ok': False, 'msg': '⚠️ Device already used!'})
+        # Device check
+        if not settings.get('ignore_device_check', False):
+            for u_id, u_data in users.items():
+                if u_id == uid: 
+                    continue
+                if u_data.get('verified') and str(u_data.get('device_id', '')) == fp:
+                    return jsonify({'ok': False, 'msg': '⚠️ Device already used!'})
 
-            try: 
-                bonus = float(settings.get('welcome_bonus', 50))
-            except: 
-                bonus = 50.0
-            
-            users[uid].update({
-                'verified': True, 
-                'device_id': fp, 
-                'ip': client_ip,
-                'balance': float(users[uid].get('balance', 0)) + bonus
-            })
-            
-            if users[uid].get('referred_by'):
-                refer_code = users[uid]['referred_by']
-                for referrer_id, referrer_data in users.items():
-                    if referrer_data.get('refer_code') == refer_code:
-                        if uid not in referrer_data.get('referred_users', []):
-                            min_reward = float(settings.get('min_refer_reward', 10))
-                            max_reward = float(settings.get('max_refer_reward', 50))
-                            reward = random.uniform(min_reward, max_reward)
-                            reward = round(reward, 2)
-                            
-                            referrer_data['balance'] = float(referrer_data.get('balance', 0)) + reward
-                            if 'referred_users' not in referrer_data:
-                                referrer_data['referred_users'] = []
-                            referrer_data['referred_users'].append(uid)
-                            
-                            w_list = load_json(WITHDRAWALS_FILE, [])
-                            w_list.append({
-                                "tx_id": f"REF-VERIFY-{generate_code(5)}",
-                                "user_id": referrer_id,
-                                "name": "Referral Bonus (Verified)",
-                                "amount": reward,
-                                "upi": "-",
-                                "status": "completed",
-                                "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-                            })
-                            save_json(WITHDRAWALS_FILE, w_list)
-                            
-                            safe_send_message(referrer_id, f"🎉 *Referral Bonus!*\nYou earned ₹{reward} for {users[uid]['name']}'s verification")
-                        break
-            
-            save_json(USERS_FILE, users)
-            
-            w_list = load_json(WITHDRAWALS_FILE, [])
-            w_list.append({
-                "tx_id": "BONUS", 
-                "user_id": uid, 
-                "name": "Signup Bonus",
-                "amount": bonus, 
-                "upi": "-", 
-                "status": "completed",
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-            })
-            save_json(WITHDRAWALS_FILE, w_list)
-            return jsonify({'ok': True, 'bonus': bonus})
+        try: 
+            bonus = float(settings.get('welcome_bonus', 50))
+        except: 
+            bonus = 50.0
         
-        return jsonify({'ok': True, 'bonus': 0}) 
-
+        users[uid].update({
+            'verified': True, 
+            'device_id': fp, 
+            'ip': client_ip,
+            'balance': float(users[uid].get('balance', 0)) + bonus
+        })
+        
+        if users[uid].get('referred_by'):
+            refer_code = users[uid]['referred_by']
+            for referrer_id, referrer_data in users.items():
+                if referrer_data.get('refer_code') == refer_code:
+                    if uid not in referrer_data.get('referred_users', []):
+                        min_reward = float(settings.get('min_refer_reward', 10))
+                        max_reward = float(settings.get('max_refer_reward', 50))
+                        reward = random.uniform(min_reward, max_reward)
+                        reward = round(reward, 2)
+                        
+                        referrer_data['balance'] = float(referrer_data.get('balance', 0)) + reward
+                        if 'referred_users' not in referrer_data:
+                            referrer_data['referred_users'] = []
+                        referrer_data['referred_users'].append(uid)
+                        
+                        w_list = load_json(WITHDRAWALS_FILE, [])
+                        w_list.append({
+                            "tx_id": f"REF-VERIFY-{generate_code(5)}",
+                            "user_id": referrer_id,
+                            "name": "Referral Bonus (Verified)",
+                            "amount": reward,
+                            "upi": "-",
+                            "status": "completed",
+                            "date": datetime.now().strftime("%Y-%m-d %H:%M")
+                        })
+                        save_json(WITHDRAWALS_FILE, w_list)
+                        
+                        safe_send_message(referrer_id, f"🎉 *Referral Bonus!*\nYou earned ₹{reward} for {users[uid]['name']}'s verification")
+                    break
+        
+        save_json(USERS_FILE, users)
+        
+        w_list = load_json(WITHDRAWALS_FILE, [])
+        w_list.append({
+            "tx_id": "BONUS", 
+            "user_id": uid, 
+            "name": "Signup Bonus",
+            "amount": bonus, 
+            "upi": "-", 
+            "status": "completed",
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+        })
+        save_json(WITHDRAWALS_FILE, w_list)
+        return jsonify({'ok': True, 'bonus': bonus})
+    
     except Exception as e:
         logger.error(f"Verify error: {e}")
         return jsonify({'ok': False, 'msg': f"Error: {str(e)}"})
@@ -530,7 +542,7 @@ def api_history():
             return jsonify([])
         
         history = [w for w in load_json(WITHDRAWALS_FILE, []) if w.get('user_id') == uid]
-        return jsonify(history[::-1])
+        return jsonify(history[::-1][:10])  # Limit to 10 items for faster loading
     except Exception as e:
         logger.error(f"History error: {e}")
         return jsonify([])
@@ -660,12 +672,15 @@ def api_get_refer_info():
             save_json(USERS_FILE, users)
         
         refer_code = user.get('refer_code', '')
+        
+        try:
+            bot_username = bot.get_me().username
+        except:
+            bot_username = "telegram_bot"
+        
         referred_users = user.get('referred_users', [])
-        
-        bot_username = bot.get_me().username
-        
         referred_details = []
-        for ref_uid in referred_users:
+        for ref_uid in referred_users[:10]:  # Limit to 10 for faster loading
             if ref_uid in users:
                 status = "✅ VERIFIED" if users[ref_uid].get('verified') else "⏳ PENDING"
                 referred_details.append({
@@ -990,7 +1005,6 @@ MINI_APP_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/clientjs@0.2.1/dist/client.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <style>
         :root { --bg: #050508; --cyan: #00f3ff; --gold: #ffd700; --panel: rgba(255,255,255,0.05); }
@@ -999,9 +1013,12 @@ MINI_APP_TEMPLATE = """
         .header { display: flex; align-items: center; justify-content: center; gap: 15px; margin: 15px 0; width: 100%; padding: 0 5%; }
         .logo { width: 50px; height: 50px; border-radius: 50%; border: 2px solid var(--cyan); box-shadow: 0 0 15px rgba(0,243,255,0.3); object-fit: cover; }
         .title { font-size: 22px; font-weight: 800; text-shadow: 0 0 10px var(--cyan); letter-spacing: 1px; }
-        .nav-bar { display: flex; width: 100%; max-width: 500px; background: rgba(0,0,0,0.7); border-radius: 15px; margin: 10px auto; padding: 8px; justify-content: space-around; border: 1px solid rgba(255,255,255,0.1); }
-        .nav-btn { background: transparent; border: none; color: #aaa; padding: 10px 15px; border-radius: 10px; font-weight: bold; font-size: 14px; display: flex; align-items: center; gap: 5px; cursor: pointer; transition: all 0.3s; }
-        .nav-btn.active { background: rgba(0,243,255,0.2); color: var(--cyan); box-shadow: 0 0 10px rgba(0,243,255,0.3); }
+        .nav-bar { display: flex; width: 100%; max-width: 500px; background: rgba(0,0,0,0.7); border-radius: 15px; margin: 10px auto; padding: 5px; justify-content: space-around; border: 1px solid rgba(255,255,255,0.1); }
+        .nav-btn { background: transparent; border: none; color: #aaa; padding: 8px 5px; border-radius: 10px; font-weight: bold; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; transition: all 0.3s; width: 25%; }
+        .nav-btn i { font-size: 20px; }
+        .nav-text { font-size: 10px; margin-top: 2px; color: #888; }
+        .nav-btn.active { background: rgba(0,243,255,0.15); color: var(--cyan); box-shadow: 0 0 10px rgba(0,243,255,0.3); }
+        .nav-btn.active .nav-text { color: var(--cyan); }
         .tab-content { width: 100%; max-width: 500px; padding: 0 5% 20px 5%; box-sizing: border-box; }
         .card-metal, .card-gold, .card-silver, .card-purple { width: 100%; box-sizing: border-box; border-radius: 16px; padding: 25px; margin-bottom: 20px; position: relative; overflow: hidden; }
         .card-metal { background: linear-gradient(135deg, #e0e0e0 0%, #bdc3c7 20%, #88929e 50%, #bdc3c7 80%, #e0e0e0 100%); border: 1px solid #fff; box-shadow: 0 10px 20px rgba(0,0,0,0.5), inset 0 0 15px rgba(255,255,255,0.5); display: flex; align-items: center; color: #222; }
@@ -1014,126 +1031,535 @@ MINI_APP_TEMPLATE = """
         .card-gold::after { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(255,255,255,0.3) 0%, transparent 60%); transform: rotate(30deg); pointer-events: none; }
         @keyframes pulse-gold { 50% { box-shadow: 0 0 40px rgba(255,215,0,0.6); } }
         .card-silver { background: linear-gradient(135deg, #c0c0c0 0%, #d0d0d0 30%, #e0e0e0 50%, #d0d0d0 70%, #c0c0c0 100%); border: 1px solid #fff; box-shadow: 0 10px 20px rgba(0,0,0,0.3); color: #222; text-align: center; aspect-ratio: 16/9; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .card-purple { background: linear-gradient(135deg, #9d4edd 0%, #7b2cbf 50%, #5a189a 100%); border: 1px solid #c77dff; box-shadow: 0 0 20px rgba(157,78,221,0.5); color: white; text-align: center; aspect-ratio: 16/9; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; }
+        .card-purple { background: linear-gradient(135deg, #9d4edd 0%, #7b2cbf 50%, #5a189a 100%); border: 1px solid #c77dff; box-shadow: 0 0 20px rgba(157,78,221,0.5); color: white; text-align: center; aspect-ratio: 16/9; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; padding: 20px; }
         .card-purple::before { content: ''; position: absolute; top: -10px; left: -10px; right: -10px; bottom: -10px; background: linear-gradient(45deg, #9d4edd, #7b2cbf, #5a189a, #9d4edd); z-index: -1; border-radius: 20px; opacity: 0.5; filter: blur(10px); }
-        .btn { background: #111; color: var(--gold); border: none; padding: 14px 30px; border-radius: 30px; font-weight: 800; font-size: 16px; margin-top: 15px; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; font-family: 'Rajdhani'; box-shadow: 0 5px 15px rgba(0,0,0,0.3); transition: transform 0.2s; position: relative; z-index: 5; }
+        .btn { background: #111; color: var(--gold); border: none; padding: 14px 30px; border-radius: 30px; font-weight: 800; font-size: 16px; margin-top: 15px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 10px; font-family: 'Rajdhani'; box-shadow: 0 5px 15px rgba(0,0,0,0.3); transition: transform 0.2s; position: relative; z-index: 5; width: 100%; }
         .btn:active { transform: scale(0.95); }
         .btn-purple { background: #5a189a; color: white; }
         .btn-cyan { background: #00f3ff; color: #000; }
-        .verify-box { height: 60vh; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
-        .popup { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); backdrop-filter: blur(5px); display: none; justify-content: center; align-items: center; z-index: 999; padding: 20px; box-sizing: border-box; }
+        .popup { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); backdrop-filter: blur(5px); display: none; justify-content: center; align-items: center; z-index: 9999; padding: 20px; box-sizing: border-box; }
         .popup-content { background: #1a1a20; padding: 30px; border-radius: 20px; width: 100%; max-width: 350px; border: 1px solid var(--cyan); text-align: center; box-shadow: 0 0 30px rgba(0,243,255,0.2); }
+        .popup-content h3 { margin-top: 0; color: var(--cyan); }
         input, textarea { width: 100%; padding: 12px; margin: 10px 0; background: #2a2a30; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; font-family: inherit; }
         .hist-item { background: var(--panel); border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; justify-content: space-between; border-left: 3px solid #333; width: 100%; box-sizing: border-box; }
         .status-completed { color: #00ff00; } .status-pending { color: orange; } .status-rejected { color: red; }
-        .overlay-loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 2000; display: none; flex-direction: column; justify-content: center; align-items: center; }
+        .overlay-loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
         .spinner { width: 40px; height: 40px; border: 5px solid #333; border-top: 5px solid var(--cyan); border-radius: 50%; animation: spin 1s linear infinite; margin: 20px; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .refer-code-box { background: rgba(255,255,255,0.1); border: 2px dashed var(--cyan); padding: 15px; border-radius: 10px; margin: 10px 0; font-family: monospace; font-size: 24px; letter-spacing: 3px; cursor: pointer; width: 90%; text-align: center; word-break: break-all; }
+        .refer-code-box { background: rgba(255,255,255,0.1); border: 2px dashed var(--cyan); padding: 15px; border-radius: 10px; margin: 10px 0; font-family: monospace; font-size: 24px; letter-spacing: 3px; cursor: pointer; width: 100%; text-align: center; word-break: break-all; }
         .leaderboard-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
         .leaderboard-table tr { border-bottom: 1px solid rgba(255,255,255,0.1); }
         .leaderboard-table td { padding: 10px 5px; }
         .leaderboard-table .highlight { background: rgba(0,243,255,0.1); border-left: 3px solid var(--cyan); }
-        .code-input { font-size: 24px; letter-spacing: 5px; text-align: center; text-transform: uppercase; width: 90%; margin: 10px 0; padding: 15px; border-radius: 10px; border: 2px solid silver; background: white; color: #222; }
+        .code-input { font-size: 24px; letter-spacing: 5px; text-align: center; text-transform: uppercase; width: 100%; margin: 10px 0; padding: 15px; border-radius: 10px; border: 2px solid silver; background: white; color: #222; }
         .gift-result { text-align: center; margin-top: 20px; padding: 15px; border-radius: 10px; background: rgba(0,0,0,0.3); }
         .referrals-list { max-height: 300px; overflow-y: auto; padding-right: 5px; }
         .referrals-list::-webkit-scrollbar { width: 5px; }
         .referrals-list::-webkit-scrollbar-track { background: rgba(255,255,255,0.1); }
         .referrals-list::-webkit-scrollbar-thumb { background: var(--cyan); border-radius: 5px; }
+        .verify-popup { z-index: 10000; }
+        .verify-popup .popup-content { max-width: 400px; }
+        .verify-actions { display: flex; gap: 10px; margin-top: 20px; }
+        .verify-actions button { flex: 1; }
+        .balance-loading { font-size: 48px; font-weight: 900; margin: 5px 0; text-shadow: 0 2px 5px rgba(0,0,0,0.2); color: #666; }
+        .skeleton { background: linear-gradient(90deg, #333 25%, #444 50%, #333 75%); background-size: 200% 100%; animation: loading 1.5s infinite; }
+        @keyframes loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
     </style>
 </head>
 <body>
-    <div id="loader" class="overlay-loader" style="display:flex;"><div class="spinner"></div><div id="loader-txt" style="color:#fff; font-weight:bold; font-size:18px;">INITIALIZING...</div></div>
+    <div id="loader" class="overlay-loader"><div class="spinner"></div><div id="loader-txt" style="color:#fff; font-weight:bold; font-size:18px;">LOADING...</div></div>
     
     <div id="app" class="hidden" style="width:100%; display:flex; flex-direction:column; align-items:center;">
         <div class="header"><img src="{{ base_url }}/static/{{ settings.logo_filename }}?v={{ timestamp }}" class="logo"><div class="title">{{ settings.bot_name }}</div></div>
         
         <div class="nav-bar">
-            <button class="nav-btn active" onclick="switchTab('home')"><i class="fas fa-home"></i> HOME</button>
-            <button class="nav-btn" onclick="switchTab('gift')"><i class="fas fa-gift"></i> GIFT</button>
-            <button class="nav-btn" onclick="switchTab('refer')"><i class="fas fa-users"></i> REFER</button>
-            <button class="nav-btn" onclick="switchTab('leaderboard')"><i class="fas fa-trophy"></i> RANK</button>
+            <button class="nav-btn active" onclick="switchTab('home')">
+                <i class="fas fa-home"></i>
+                <div class="nav-text">HOME</div>
+            </button>
+            <button class="nav-btn" onclick="switchTab('gift')">
+                <i class="fas fa-gift"></i>
+                <div class="nav-text">GIFT</div>
+            </button>
+            <button class="nav-btn" onclick="switchTab('refer')">
+                <i class="fas fa-users"></i>
+                <div class="nav-text">REFER</div>
+            </button>
+            <button class="nav-btn" onclick="switchTab('leaderboard')">
+                <i class="fas fa-trophy"></i>
+                <div class="nav-text">RANK</div>
+            </button>
         </div>
-        
-        <div id="verify-screen" class="hidden verify-box"><i class="fas fa-shield-alt" style="font-size:50px; color:var(--cyan); margin-bottom:15px;"></i><h2 style="margin:0;">VERIFICATION</h2><p id="v-msg" style="color:#aaa; margin-top:10px;">Checking channels...</p><div class="spinner" style="margin:20px auto;"></div><button id="retry-btn" class="btn hidden" style="background:#f44; color:white;" onclick="location.reload()">RETRY</button></div>
         
         <div id="tab-home" class="tab-content">
             <div class="card-metal">
                 <div class="p-pic-wrapper"><img src="/get_pfp?uid={{ user_id }}" class="p-pic" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="p-icon"><i class="fas fa-user"></i></div></div>
-                <div style="z-index:2;"><div style="font-size:18px; font-weight:800;">{{ user.name }}</div><div onclick="openPop('contact')" style="color:#0044cc; font-size:13px; margin-top:5px; cursor:pointer; text-decoration:underline; font-weight:bold;">Contact Admin</div></div>
+                <div style="z-index:2;">
+                    <div style="font-size:18px; font-weight:800;">{{ user.name }}</div>
+                    <div onclick="openPop('contact')" style="color:#0044cc; font-size:13px; margin-top:5px; cursor:pointer; text-decoration:underline; font-weight:bold;">Contact Admin</div>
+                </div>
             </div>
             
             <div class="card-gold">
                 <div style="font-size:14px; font-weight:800; opacity:0.8; letter-spacing:2px;">WALLET BALANCE</div>
-                <div style="font-size:48px; font-weight:900; margin:5px 0; text-shadow:0 2px 5px rgba(0,0,0,0.2);">₹{{ "%.2f"|format(user.balance) }}</div>
+                <div id="balance-amount" class="balance-loading">Loading...</div>
                 <button class="btn" onclick="openPop('withdraw')"><i class="fas fa-wallet"></i> WITHDRAW</button>
             </div>
             
-            <div style="margin-top:20px; width:100%;"><div style="color:#888; font-size:13px; font-weight:bold; margin-bottom:10px;">RECENT ACTIVITY</div><div id="history-list"></div></div>
+            <div style="margin-top:20px; width:100%;">
+                <div style="color:#888; font-size:13px; font-weight:bold; margin-bottom:10px;">RECENT ACTIVITY</div>
+                <div id="history-list">
+                    <div class="hist-item skeleton" style="height:60px;"></div>
+                    <div class="hist-item skeleton" style="height:60px;"></div>
+                </div>
+            </div>
         </div>
         
         <div id="tab-gift" class="tab-content hidden">
-            <div style="text-align:center; margin-bottom:20px;"><h2 style="margin:0; color:var(--cyan);">GIFT CODE</h2></div>
-            <div class="card-silver"><input type="text" id="gift-code" class="code-input" maxlength="5" placeholder="ABCDE" oninput="this.value = this.value.toUpperCase()"><button class="btn" onclick="claimGift()" style="background:#222; color:silver; width:90%;"><i class="fas fa-gift"></i> CLAIM NOW</button></div>
+            <div style="text-align:center; margin-bottom:20px;">
+                <h2 style="margin:0; color:var(--cyan);">GIFT CODE</h2>
+                <p style="color:#aaa; margin-top:5px;">Enter 5-character code</p>
+            </div>
+            <div class="card-silver">
+                <input type="text" id="gift-code" class="code-input" maxlength="5" placeholder="ABCDE" oninput="this.value = this.value.toUpperCase()">
+                <button class="btn" onclick="claimGift()" style="background:#222; color:silver;"><i class="fas fa-gift"></i> CLAIM NOW</button>
+            </div>
             <div id="gift-result" class="gift-result"></div>
         </div>
         
         <div id="tab-refer" class="tab-content hidden">
-            <div style="text-align:center; margin-bottom:20px;"><h2 style="margin:0; color:#9d4edd;">REFER & EARN</h2></div>
+            <div style="text-align:center; margin-bottom:20px;">
+                <h2 style="margin:0; color:#9d4edd;">REFER & EARN</h2>
+                <p style="color:#aaa; margin-top:5px;">Share your code and earn rewards</p>
+            </div>
             <div class="card-purple">
                 <div id="refer-code-display" class="refer-code-box" onclick="copyReferCode()">LOADING...</div>
-                <button class="btn btn-purple" onclick="shareReferLink()" style="width:90%; margin:15px 0;"><i class="fas fa-share-alt"></i> SHARE ON TELEGRAM</button>
-                <div style="margin-top:20px; font-size:14px; text-align:center;"><div style="color:#c77dff; font-weight:bold;">Min Reward: ₹{{ settings.min_refer_reward }}</div><div style="color:#c77dff; font-weight:bold;">Max Reward: ₹{{ settings.max_refer_reward }}</div></div>
+                <button class="btn btn-purple" onclick="shareReferLink()" style="margin-top:20px;"><i class="fas fa-share-alt"></i> SHARE LINK</button>
             </div>
-            <div style="width:100%; margin-top:20px;"><h3 style="color:#9d4edd; margin-bottom:10px;">YOUR REFERRALS</h3><div id="referrals-list" class="referrals-list"></div></div>
+            <div style="width:100%; margin-top:20px;">
+                <h3 style="color:#9d4edd; margin-bottom:10px;">YOUR REFERRALS</h3>
+                <div id="referrals-list" class="referrals-list">
+                    <div style="text-align:center; color:#666; padding:20px;">Loading referrals...</div>
+                </div>
+            </div>
         </div>
         
         <div id="tab-leaderboard" class="tab-content hidden">
-            <div style="text-align:center; margin-bottom:20px;"><h2 style="margin:0; color:var(--gold);">LEADERBOARD</h2><p style="color:#aaa; font-size:14px;">Top 20 Users by Balance</p></div>
+            <div style="text-align:center; margin-bottom:20px;">
+                <h2 style="margin:0; color:var(--gold);">LEADERBOARD</h2>
+                <p style="color:#aaa; font-size:14px;">Top 20 Users by Balance</p>
+            </div>
             <table class="leaderboard-table">
-                <thead><tr style="background:rgba(255,215,0,0.1);"><td style="font-weight:bold; color:var(--gold);">RANK</td><td style="font-weight:bold; color:var(--gold);">NAME</td><td style="font-weight:bold; color:var(--gold); text-align:right;">BALANCE</td><td style="font-weight:bold; color:var(--gold); text-align:right;">REFERS</td></tr></thead>
+                <thead>
+                    <tr style="background:rgba(255,215,0,0.1);">
+                        <td style="font-weight:bold; color:var(--gold);">RANK</td>
+                        <td style="font-weight:bold; color:var(--gold);">NAME</td>
+                        <td style="font-weight:bold; color:var(--gold); text-align:right;">BALANCE</td>
+                        <td style="font-weight:bold; color:var(--gold); text-align:right;">REFERS</td>
+                    </tr>
+                </thead>
                 <tbody id="leaderboard-list">
                     {% for user in leaderboard %}
-                    <tr {% if user.user_id == user_id %}class="highlight"{% endif %}><td style="font-weight:bold; color:#ccc;">{{ loop.index }}</td><td><div style="font-weight:bold;">{{ user.name[:15] }}{% if user.name|length > 15 %}...{% endif %}</div><div style="font-size:10px; color:#888;">{{ user.user_id[:8] }}...</div></td><td style="text-align:right; font-weight:bold; color:var(--gold);">₹{{ "%.2f"|format(user.balance) }}</td><td style="text-align:right; font-size:12px; color:#aaa;">{{ user.total_refers }}</td></tr>
+                    <tr {% if user.user_id == user_id %}class="highlight"{% endif %}>
+                        <td style="font-weight:bold; color:#ccc;">{{ loop.index }}</td>
+                        <td>
+                            <div style="font-weight:bold;">{{ user.name[:15] }}{% if user.name|length > 15 %}...{% endif %}</div>
+                            <div style="font-size:10px; color:#888;">{{ user.user_id[:8] }}...</div>
+                        </td>
+                        <td style="text-align:right; font-weight:bold; color:var(--gold);">₹{{ "%.2f"|format(user.balance) }}</td>
+                        <td style="text-align:right; font-size:12px; color:#aaa;">{{ user.total_refers }}</td>
+                    </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
     </div>
     
-    <div id="pop-contact" class="popup"><div class="popup-content"><h3>Support</h3><textarea id="c-msg" rows="3" placeholder="Message..."></textarea><input type="file" id="c-file" accept="image/*"><button class="btn" onclick="sendContact()">SEND</button><button class="btn" onclick="closePop()" style="background:transparent; color:#f44; margin-top:10px;">Close</button></div></div>
-    <div id="pop-withdraw" class="popup"><div class="popup-content"><h3>Withdraw</h3><input id="w-upi" placeholder="Enter UPI ID (e.g. name@bank)"><input id="w-amt" type="number" placeholder="Amount"><button class="btn" onclick="subW()">SUBMIT</button><button class="btn" onclick="closePop()" style="background:transparent; color:#f44; margin-top:10px;">Cancel</button></div></div>
+    <!-- Popups -->
+    <div id="pop-contact" class="popup">
+        <div class="popup-content">
+            <h3>Contact Admin</h3>
+            <textarea id="c-msg" rows="3" placeholder="Your message..."></textarea>
+            <input type="file" id="c-file" accept="image/*">
+            <button class="btn" onclick="sendContact()">SEND MESSAGE</button>
+            <button class="btn" onclick="closePop()" style="background:transparent; color:#f44; margin-top:10px;">Close</button>
+        </div>
+    </div>
+    
+    <div id="pop-withdraw" class="popup">
+        <div class="popup-content">
+            <h3>Withdraw Money</h3>
+            <input id="w-upi" placeholder="Enter UPI ID (e.g. name@bank)">
+            <input id="w-amt" type="number" placeholder="Amount (Min: ₹{{ settings.min_withdrawal }})">
+            <button class="btn" onclick="submitWithdraw()">WITHDRAW</button>
+            <button class="btn" onclick="closePop()" style="background:transparent; color:#f44; margin-top:10px;">Cancel</button>
+        </div>
+    </div>
+    
+    <div id="pop-verify" class="popup verify-popup">
+        <div class="popup-content">
+            <h3>⚠️ Verification Required</h3>
+            <p id="verify-error-msg" style="color:#ff9900; margin:15px 0;">Please complete verification to continue</p>
+            <div class="verify-actions">
+                <button class="btn" onclick="location.reload()" style="background:#f44; color:white;">RETRY</button>
+                <button class="btn" onclick="closePop()" style="background:#666; color:white;">CLOSE</button>
+            </div>
+        </div>
+    </div>
     
     <script>
-        const UID="{{ user_id }}";
-        let referData=null;
+        const UID = "{{ user_id }}";
+        let referData = null;
+        let isVerified = {{ user.verified|lower }};
         
-        window.onload=()=>{setTimeout(()=>{document.getElementById('loader').style.display='none';document.getElementById('app').classList.remove('hidden');verifySilent();loadReferInfo();},600)};
+        // Fast loading - show app immediately, load data in background
+        window.onload = function() {
+            // Show app structure immediately
+            document.getElementById('loader').style.display = 'none';
+            document.getElementById('app').classList.remove('hidden');
+            
+            // Start loading critical data
+            loadCriticalData();
+        };
         
-        function switchTab(tabName){document.querySelectorAll('.nav-btn').forEach(btn=>btn.classList.remove('active'));event.target.classList.add('active');document.querySelectorAll('.tab-content').forEach(tab=>tab.classList.add('hidden'));document.getElementById('tab-'+tabName).classList.remove('hidden');if(tabName==='leaderboard'){loadLeaderboard();}}
+        function loadCriticalData() {
+            // Update balance immediately
+            updateBalance();
+            
+            // Load history
+            loadHistory();
+            
+            // Check verification in background
+            if (!isVerified) {
+                checkVerification();
+            }
+            
+            // Load refer info if needed
+            loadReferInfo();
+        }
         
-        function verifySilent(){loadHistory();fetch('/api/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:UID,fp:'skip',bot_type:'main'})}).then(r=>r.json()).then(d=>{if(!d.ok){document.getElementById('tab-home').classList.add('hidden');document.getElementById('verify-screen').classList.remove('hidden');document.getElementById('v-msg').innerHTML=`<span style="color:#f44">${d.msg}</span>`;if(d.msg.includes('Device'))document.getElementById('retry-btn').classList.remove('hidden');}else if(d.bonus>0){refreshApp();}}).catch(err=>console.error('Verify error:',err));}
+        function updateBalance() {
+            // Quick balance update from server
+            fetch('/mini_app?user_id=' + UID)
+                .then(r => r.text())
+                .then(html => {
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = html;
+                    const balanceElement = tempDiv.querySelector('.card-gold div:nth-child(2)');
+                    if (balanceElement) {
+                        document.getElementById('balance-amount').textContent = balanceElement.textContent;
+                        document.getElementById('balance-amount').classList.remove('balance-loading');
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('balance-amount').textContent = '₹{{ "%.2f"|format(user.balance) }}';
+                    document.getElementById('balance-amount').classList.remove('balance-loading');
+                });
+        }
         
-        function refreshApp(){fetch('/api/history?user_id='+UID).then(r=>r.json()).then(l=>{const container=document.getElementById('history-list');if(!l.length){container.innerHTML='<div style="text-align:center; color:#555; padding:20px;">No Activity</div>';return;}container.innerHTML=l.map(i=>`<div class="hist-item" style="border-left-color:${i.status=='completed'?'#0f0':i.status=='pending'?'orange':'red'}"><div><div style="font-weight:bold;">${i.name}</div><div style="font-size:11px;color:#888;">${i.date}</div>${i.tx_id&&i.tx_id!=='BONUS'?`<div style="font-size:10px;color:#aaa;">TxID: ${i.tx_id}</div>`:''}</div><div style="text-align:right;"><div style="font-weight:bold;">₹${i.amount.toFixed(2)}</div><div class="status-${i.status}">${i.status.toUpperCase()}</div>${i.utr?`<div style="font-size:10px;color:#aaa;">${i.utr}</div>`:''}</div></div>`).join('');});fetch('/mini_app?user_id='+UID).then(r=>r.text()).then(html=>{const parser=new DOMParser();const doc=parser.parseFromString(html,'text/html');const balanceElement=doc.querySelector('.card-gold div:nth-child(2)');if(balanceElement){document.querySelector('.card-gold div:nth-child(2)').textContent=balanceElement.textContent;}});}
+        function checkVerification() {
+            // Silent verification check
+            fetch('/api/verify', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({user_id: UID, fp: 'check', bot_type: 'main'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.ok && data.msg) {
+                    // Show error in popup
+                    document.getElementById('verify-error-msg').textContent = data.msg;
+                    document.getElementById('pop-verify').style.display = 'flex';
+                } else if (data.ok && data.bonus > 0) {
+                    // Bonus received
+                    updateBalance();
+                    loadHistory();
+                    // Show quick notification
+                    setTimeout(() => {
+                        if (typeof confetti === 'function') {
+                            confetti({particleCount: 100, spread: 70});
+                        }
+                    }, 500);
+                }
+            })
+            .catch(err => console.log('Verification check skipped'));
+        }
         
-        function subW(){const u=document.getElementById('w-upi').value,a=document.getElementById('w-amt').value;if(!u||!a)return alert("Fill all fields");closePop();const l=document.getElementById('loader');l.style.display='flex';document.getElementById('loader-txt').innerText="PROCESSING...";fetch('/api/withdraw',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:UID,amount:a,upi:u})}).then(r=>r.json()).then(d=>{setTimeout(()=>{l.style.display='none';if(d.ok){confetti({particleCount:200,spread:90});alert(d.msg+"\\nTxID: "+d.tx_id);refreshApp();}else{alert(d.msg);}},1000);}).catch(err=>{l.style.display='none';alert('Withdrawal failed');console.error('Withdraw error:',err);});}
+        function switchTab(tabName) {
+            // Update active nav button
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.closest('.nav-btn').classList.add('active');
+            
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+            
+            // Show selected tab
+            document.getElementById('tab-' + tabName).classList.remove('hidden');
+            
+            // Load data for specific tabs
+            if (tabName === 'leaderboard') {
+                loadLeaderboard();
+            } else if (tabName === 'refer') {
+                loadReferInfo();
+            }
+        }
         
-        function sendContact(){const fd=new FormData();fd.append('user_id',UID);fd.append('msg',document.getElementById('c-msg').value);fd.append('image',document.getElementById('c-file').files[0]);fetch('/api/contact_upload',{method:'POST',body:fd}).then(()=>{alert("Sent!");closePop();}).catch(err=>{alert('Failed to send');console.error('Contact error:',err);});}
+        function submitWithdraw() {
+            const upi = document.getElementById('w-upi').value.trim();
+            const amount = document.getElementById('w-amt').value;
+            
+            if (!upi || !amount) {
+                alert('Please fill all fields');
+                return;
+            }
+            
+            closePop();
+            
+            // Show quick loading
+            const originalText = event.target.textContent;
+            event.target.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:3px;"></div>';
+            event.target.disabled = true;
+            
+            fetch('/api/withdraw', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({user_id: UID, amount: amount, upi: upi})
+            })
+            .then(r => r.json())
+            .then(data => {
+                event.target.innerHTML = originalText;
+                event.target.disabled = false;
+                
+                if (data.ok) {
+                    alert(data.msg);
+                    if (data.auto) {
+                        if (typeof confetti === 'function') {
+                            confetti({particleCount: 150, spread: 80});
+                        }
+                    }
+                    updateBalance();
+                    loadHistory();
+                } else {
+                    alert(data.msg);
+                }
+            })
+            .catch(err => {
+                event.target.innerHTML = originalText;
+                event.target.disabled = false;
+                alert('Withdrawal failed. Please try again.');
+                console.error('Withdraw error:', err);
+            });
+        }
         
-        function loadHistory(){fetch('/api/history?user_id='+UID).then(r=>r.json()).then(l=>{const container=document.getElementById('history-list');if(!l||!l.length){container.innerHTML='<div style="text-align:center; color:#555; padding:20px;">No Activity</div>';return;}container.innerHTML=l.map(i=>`<div class="hist-item" style="border-left-color:${i.status=='completed'?'#0f0':i.status=='pending'?'orange':'red'}"><div><div style="font-weight:bold;">${i.name}</div><div style="font-size:11px;color:#888;">${i.date}</div>${i.tx_id&&i.tx_id!=='BONUS'?`<div style="font-size:10px;color:#aaa;">TxID: ${i.tx_id}</div>`:''}</div><div style="text-align:right;"><div style="font-weight:bold;">₹${i.amount.toFixed(2)}</div><div class="status-${i.status}">${i.status.toUpperCase()}</div>${i.utr?`<div style="font-size:10px;color:#aaa;">${i.utr}</div>`:''}</div></div>`).join('');}).catch(err=>console.error('History error:',err));}
+        function sendContact() {
+            const message = document.getElementById('c-msg').value;
+            const fileInput = document.getElementById('c-file');
+            
+            if (!message.trim()) {
+                alert('Please enter a message');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('user_id', UID);
+            formData.append('msg', message);
+            if (fileInput.files[0]) {
+                formData.append('image', fileInput.files[0]);
+            }
+            
+            fetch('/api/contact_upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Message sent successfully!');
+                    closePop();
+                    document.getElementById('c-msg').value = '';
+                    document.getElementById('c-file').value = '';
+                } else {
+                    alert('Failed to send: ' + data.msg);
+                }
+            })
+            .catch(err => {
+                alert('Failed to send message');
+                console.error('Contact error:', err);
+            });
+        }
         
-        function loadReferInfo(){fetch('/api/get_refer_info?user_id='+UID).then(r=>r.json()).then(data=>{if(data.ok){referData=data;document.getElementById('refer-code-display').textContent=data.refer_code;const referralsList=document.getElementById('referrals-list');if(data.referred_users&&data.referred_users.length){referralsList.innerHTML=data.referred_users.map(u=>`<div style="background:rgba(157,78,221,0.1); padding:10px; border-radius:8px; margin-bottom:5px;"><div style="font-weight:bold;">${u.name}</div><div style="font-size:10px; color:#888;">ID: ${u.id}</div><div style="font-size:11px; margin-top:5px; font-weight:bold; color:${u.status.includes('VERIFIED')?'#0f0':'orange'}">${u.status}</div></div>`).join('');}else{referralsList.innerHTML='<div style="text-align:center; color:#666; padding:20px;">No referrals yet</div>';}}else{document.getElementById('refer-code-display').textContent='ERROR';}}).catch(err=>{document.getElementById('refer-code-display').textContent='ERROR';console.error('Refer info error:',err);});}
+        function loadHistory() {
+            fetch('/api/history?user_id=' + UID)
+            .then(r => r.json())
+            .then(history => {
+                const container = document.getElementById('history-list');
+                if (!history || history.length === 0) {
+                    container.innerHTML = '<div style="text-align:center; color:#555; padding:20px;">No activity yet</div>';
+                    return;
+                }
+                
+                container.innerHTML = history.map(item => `
+                    <div class="hist-item" style="border-left-color:${item.status === 'completed' ? '#0f0' : item.status === 'pending' ? 'orange' : 'red'}">
+                        <div>
+                            <div style="font-weight:bold;">${item.name || 'Transaction'}</div>
+                            <div style="font-size:11px;color:#888;">${item.date || ''}</div>
+                            ${item.tx_id && item.tx_id !== 'BONUS' ? `<div style="font-size:10px;color:#aaa;">ID: ${item.tx_id}</div>` : ''}
+                        </div>
+                        <div style="text-align:right;">
+                            <div style="font-weight:bold;">₹${(item.amount || 0).toFixed(2)}</div>
+                            <div class="status-${item.status}">${(item.status || '').toUpperCase()}</div>
+                            ${item.utr ? `<div style="font-size:10px;color:#aaa;">${item.utr}</div>` : ''}
+                        </div>
+                    </div>
+                `).join('');
+            })
+            .catch(err => {
+                console.error('History error:', err);
+            });
+        }
         
-        function copyReferCode(){if(!referData)return;navigator.clipboard.writeText(referData.refer_link).then(()=>alert('Refer link copied!')).catch(()=>alert('Failed to copy'));}
+        function loadReferInfo() {
+            fetch('/api/get_refer_info?user_id=' + UID)
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    referData = data;
+                    document.getElementById('refer-code-display').textContent = data.refer_code;
+                    
+                    const referralsList = document.getElementById('referrals-list');
+                    if (data.referred_users && data.referred_users.length > 0) {
+                        referralsList.innerHTML = data.referred_users.map(user => `
+                            <div style="background:rgba(157,78,221,0.1); padding:10px; border-radius:8px; margin-bottom:5px;">
+                                <div style="font-weight:bold;">${user.name}</div>
+                                <div style="font-size:10px; color:#888;">ID: ${user.id}</div>
+                                <div style="font-size:11px; margin-top:5px; font-weight:bold; color:${user.status.includes('VERIFIED') ? '#0f0' : 'orange'}">
+                                    ${user.status}
+                                </div>
+                            </div>
+                        `).join('');
+                    } else {
+                        referralsList.innerHTML = '<div style="text-align:center; color:#666; padding:20px;">No referrals yet. Share your code!</div>';
+                    }
+                }
+            })
+            .catch(err => {
+                console.error('Refer info error:', err);
+            });
+        }
         
-        function shareReferLink(){if(!referData)return;const text=`🎉 Join {{ settings.bot_name }} and earn money!\\nUse my refer code: ${referData.refer_code}\\n${referData.refer_link}`;window.open(`https://t.me/share/url?url=${encodeURIComponent(referData.refer_link)}&text=${encodeURIComponent(text)}`,'_blank');}
+        function copyReferCode() {
+            if (!referData) return;
+            
+            navigator.clipboard.writeText(referData.refer_code)
+                .then(() => {
+                    // Quick feedback
+                    const original = document.getElementById('refer-code-display').textContent;
+                    document.getElementById('refer-code-display').textContent = 'COPIED!';
+                    document.getElementById('refer-code-display').style.color = '#0f0';
+                    setTimeout(() => {
+                        document.getElementById('refer-code-display').textContent = original;
+                        document.getElementById('refer-code-display').style.color = '';
+                    }, 1000);
+                })
+                .catch(() => alert('Failed to copy'));
+        }
         
-        function claimGift(){const code=document.getElementById('gift-code').value.trim().toUpperCase();if(!code||code.length!==5){alert('Enter 5-character code');return;}const l=document.getElementById('loader');l.style.display='flex';document.getElementById('loader-txt').innerText='CLAIMING...';fetch('/api/claim_gift',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:UID,code:code})}).then(r=>r.json()).then(data=>{setTimeout(()=>{l.style.display='none';const resultDiv=document.getElementById('gift-result');if(data.ok){resultDiv.innerHTML=`<div style="color:#0f0; font-weight:bold; font-size:18px;">${data.msg}</div>`;document.getElementById('gift-code').value='';confetti({particleCount:300,spread:100});refreshApp();}else{resultDiv.innerHTML=`<div style="color:#f44; font-weight:bold;">${data.msg}</div>`;}},1000);}).catch(err=>{l.style.display='none';alert('Failed to claim');console.error('Claim error:',err);});}
+        function shareReferLink() {
+            if (!referData) return;
+            
+            const text = `🎉 Join {{ settings.bot_name }} and earn money! Use my refer code: ${referData.refer_code}\n${referData.refer_link}`;
+            const url = `https://t.me/share/url?url=${encodeURIComponent(referData.refer_link)}&text=${encodeURIComponent(text)}`;
+            window.open(url, '_blank');
+        }
         
-        function loadLeaderboard(){fetch('/api/leaderboard').then(r=>r.json()).then(data=>{const container=document.getElementById('leaderboard-list');if(!data.data||!data.data.length){container.innerHTML='<tr><td colspan="4" style="text-align:center; padding:20px; color:#666;">No data</td></tr>';return;}container.innerHTML=data.data.map((user,index)=>`<tr ${user.user_id==UID?'class="highlight"':''}><td style="font-weight:bold; color:#ccc;">${index+1}</td><td><div style="font-weight:bold;">${(user.name||'').substring(0,15)}${(user.name||'').length>15?'...':''}</div><div style="font-size:10px; color:#888;">${(user.user_id||'').substring(0,8)}...</div></td><td style="text-align:right; font-weight:bold; color:var(--gold);">₹${(user.balance||0).toFixed(2)}</td><td style="text-align:right; font-size:12px; color:#aaa;">${user.total_refers||0}</td></tr>`).join('');}).catch(err=>console.error('Leaderboard error:',err));}
+        function claimGift() {
+            const code = document.getElementById('gift-code').value.trim().toUpperCase();
+            
+            if (!code || code.length !== 5) {
+                alert('Please enter a valid 5-character code');
+                return;
+            }
+            
+            // Show loading
+            const originalText = event.target.textContent;
+            event.target.innerHTML = '<div class="spinner" style="width:20px;height:20px;border-width:3px;"></div>';
+            event.target.disabled = true;
+            
+            fetch('/api/claim_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({user_id: UID, code: code})
+            })
+            .then(r => r.json())
+            .then(data => {
+                event.target.innerHTML = originalText;
+                event.target.disabled = false;
+                
+                const resultDiv = document.getElementById('gift-result');
+                if (data.ok) {
+                    resultDiv.innerHTML = `<div style="color:#0f0; font-weight:bold; font-size:18px;">${data.msg}</div>`;
+                    document.getElementById('gift-code').value = '';
+                    
+                    if (typeof confetti === 'function') {
+                        confetti({particleCount: 200, spread: 90});
+                    }
+                    
+                    // Update balance
+                    updateBalance();
+                    loadHistory();
+                } else {
+                    resultDiv.innerHTML = `<div style="color:#f44; font-weight:bold;">${data.msg}</div>`;
+                }
+                
+                // Clear result after 5 seconds
+                setTimeout(() => {
+                    resultDiv.innerHTML = '';
+                }, 5000);
+            })
+            .catch(err => {
+                event.target.innerHTML = originalText;
+                event.target.disabled = false;
+                alert('Failed to claim gift code');
+                console.error('Claim error:', err);
+            });
+        }
         
-        function openPop(id){document.getElementById('pop-'+id).style.display='flex'}
-        function closePop(){document.querySelectorAll('.popup').forEach(e=>e.style.display='none')}
+        function loadLeaderboard() {
+            fetch('/api/leaderboard')
+            .then(r => r.json())
+            .then(data => {
+                const container = document.getElementById('leaderboard-list');
+                if (!data.data || data.data.length === 0) {
+                    container.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#666;">No data available</td></tr>';
+                    return;
+                }
+                
+                container.innerHTML = data.data.map((user, index) => `
+                    <tr ${user.user_id == UID ? 'class="highlight"' : ''}>
+                        <td style="font-weight:bold; color:#ccc;">${index + 1}</td>
+                        <td>
+                            <div style="font-weight:bold;">${(user.name || '').substring(0, 15)}${(user.name || '').length > 15 ? '...' : ''}</div>
+                            <div style="font-size:10px; color:#888;">${(user.user_id || '').substring(0, 8)}...</div>
+                        </td>
+                        <td style="text-align:right; font-weight:bold; color:var(--gold);">₹${(user.balance || 0).toFixed(2)}</td>
+                        <td style="text-align:right; font-size:12px; color:#aaa;">${user.total_refers || 0}</td>
+                    </tr>
+                `).join('');
+            })
+            .catch(err => {
+                console.error('Leaderboard error:', err);
+            });
+        }
+        
+        function openPop(id) {
+            document.getElementById('pop-' + id).style.display = 'flex';
+        }
+        
+        function closePop() {
+            document.querySelectorAll('.popup').forEach(popup => {
+                popup.style.display = 'none';
+            });
+        }
     </script>
 </body>
 </html>
@@ -1188,12 +1614,21 @@ ADMIN_TEMPLATE = """
     
     <div id="approveModal" class="modal"><div class="m-content"><h3>Enter UTR</h3><input id="utrInput" placeholder="UTR Number"><button class="btn" style="background:#28a745" onclick="confirmApprove()">Confirm Pay</button><button class="btn" style="background:transparent; color:#f44" onclick="document.getElementById('approveModal').style.display='none'">Cancel</button></div></div>
     
-    <div id="dash" class="tab active"><div class="card"><h3>Total Users: <span style="color:#007bff">{{ stats.total_users }}</span></h3><h3>Pending Withdrawals: <span style="color:#ffc107">{{ stats.pending_count }}</span></h3><h3>Active Gift Codes: <span style="color:#9d4edd">{{ gifts|length }}</span></h3></div></div>
+    <div id="dash" class="tab active">
+        <div class="card">
+            <h3>Total Users: <span style="color:#007bff">{{ stats.total_users }}</span></h3>
+            <h3>Pending Withdrawals: <span style="color:#ffc107">{{ stats.pending_count }}</span></h3>
+            <h3>Active Gift Codes: <span style="color:#9d4edd">{{ gifts|length }}</span></h3>
+        </div>
+    </div>
     
     <div id="withs" class="tab">
         <div class="card" style="padding:0; overflow:hidden;">
             <table style="width:100%;">
-                <tr style="background:#2a2a30;"><th>Request Info</th><th style="text-align:right;">Action</th></tr>
+                <tr style="background:#2a2a30;">
+                    <th>Request Info</th>
+                    <th style="text-align:right;">Action</th>
+                </tr>
                 {% for w in withdrawals %}
                 <tr>
                     <td>
@@ -1219,10 +1654,19 @@ ADMIN_TEMPLATE = """
     </div>
 
     <div id="users" class="tab">
-        <div class="card"><input placeholder="Search" onkeyup="search(this)">
-            <table id="uTable"><tr><th>ID</th><th>Name</th><th>Bal</th><th>Refers</th><th>Code</th></tr>
+        <div class="card">
+            <input placeholder="Search by name or ID" onkeyup="searchUsers(this)">
+            <table id="uTable">
+                <tr><th>ID</th><th>Name</th><th>Bal</th><th>Refers</th><th>Code</th><th>Verified</th></tr>
                 {% for uid, u in users.items() %}
-                <tr><td class="nowrap">{{ uid[:8] }}...</td><td>{{ u.name }}</td><td>{{ "%.2f"|format(u.balance) }}</td><td>{{ u.referred_users|length if u.referred_users else 0 }}</td><td style="font-family:monospace; font-size:11px;">{{ u.refer_code if u.refer_code else 'N/A' }}</td></tr>
+                <tr>
+                    <td class="nowrap">{{ uid[:8] }}...</td>
+                    <td>{{ u.name }}</td>
+                    <td>{{ "%.2f"|format(u.balance) }}</td>
+                    <td>{{ u.referred_users|length if u.referred_users else 0 }}</td>
+                    <td style="font-family:monospace; font-size:11px;">{{ u.refer_code if u.refer_code else 'N/A' }}</td>
+                    <td>{% if u.verified %}✅{% else %}❌{% endif %}</td>
+                </tr>
                 {% endfor %}
             </table>
         </div>
@@ -1231,27 +1675,81 @@ ADMIN_TEMPLATE = """
     <div id="sets" class="tab">
         <div class="card">
             <label>Bot Name</label><input id="bName" value="{{ settings.bot_name }}">
-            <label>Min Withdraw</label><input type="number" id="minW" value="{{ settings.min_withdrawal }}">
-            <label>Welcome Bonus</label><input type="number" id="bonus" value="{{ settings.welcome_bonus }}">
-            <label>Min Refer Reward</label><input type="number" id="minRef" value="{{ settings.min_refer_reward }}">
-            <label>Max Refer Reward</label><input type="number" id="maxRef" value="{{ settings.max_refer_reward }}">
-            <div style="margin:10px 0"><input type="checkbox" id="dis" style="width:auto" {{ 'checked' if settings.bots_disabled else '' }}> Disable Bots</div>
-            <div style="margin:10px 0"><input type="checkbox" id="auto" style="width:auto" {{ 'checked' if settings.auto_withdraw else '' }}> Auto-Withdraw</div>
-            <div style="margin:10px 0"><input type="checkbox" id="idevice" style="width:auto" {{ 'checked' if settings.ignore_device_check else '' }}> Disable Strict Device Check</div>
-            <div style="margin:10px 0"><input type="checkbox" id="withdraw_disabled" style="width:auto" {{ 'checked' if settings.withdraw_disabled else '' }}> Disable Withdrawals</div>
+            <label>Min Withdraw (₹)</label><input type="number" id="minW" value="{{ settings.min_withdrawal }}">
+            <label>Welcome Bonus (₹)</label><input type="number" id="bonus" value="{{ settings.welcome_bonus }}">
+            <label>Min Refer Reward (₹)</label><input type="number" id="minRef" value="{{ settings.min_refer_reward }}">
+            <label>Max Refer Reward (₹)</label><input type="number" id="maxRef" value="{{ settings.max_refer_reward }}">
+            <div style="margin:10px 0">
+                <input type="checkbox" id="dis" style="width:auto" {{ 'checked' if settings.bots_disabled else '' }}> 
+                <label for="dis">Disable Bot for Users</label>
+            </div>
+            <div style="margin:10px 0">
+                <input type="checkbox" id="auto" style="width:auto" {{ 'checked' if settings.auto_withdraw else '' }}> 
+                <label for="auto">Auto-Withdraw (Instant Payment)</label>
+            </div>
+            <div style="margin:10px 0">
+                <input type="checkbox" id="idevice" style="width:auto" {{ 'checked' if settings.ignore_device_check else '' }}> 
+                <label for="idevice">Allow Same Device Multiple Accounts</label>
+            </div>
+            <div style="margin:10px 0">
+                <input type="checkbox" id="withdraw_disabled" style="width:auto" {{ 'checked' if settings.withdraw_disabled else '' }}> 
+                <label for="withdraw_disabled">Disable Withdrawals</label>
+            </div>
             <button class="btn" onclick="saveBasic()">Save Settings</button>
         </div>
-        <div class="card"><h3>Logo</h3><input type="file" id="logoFile"><button class="btn" onclick="upLogo()">Upload Logo</button></div>
+        <div class="card">
+            <h3>Upload Logo</h3>
+            <input type="file" id="logoFile" accept="image/*">
+            <button class="btn" onclick="upLogo()">Upload Logo</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">Current: {{ settings.logo_filename }}</p>
+        </div>
     </div>
     
     <div id="chans" class="tab">
-        <div class="card"><input id="cName" placeholder="Channel Name"><input id="cLink" placeholder="Channel Link"><input id="cId" placeholder="Channel ID"><button class="btn" onclick="addChan()">Add Channel</button></div>
-        <div class="card"><table>{% for ch in settings.channels %}<tr><td>{{ ch.btn_name }}</td><td><button class="btn-del" onclick="delChan({{ loop.index0 }})">X</button></td></tr>{% endfor %}</table></div>
+        <div class="card">
+            <h3>Add Channel</h3>
+            <input id="cName" placeholder="Channel Name (e.g. News Channel)">
+            <input id="cLink" placeholder="Channel Link (https://t.me/...)">
+            <input id="cId" placeholder="Channel ID (e.g. @channelusername)">
+            <button class="btn" onclick="addChan()">Add Channel</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">Users must join these channels to verify</p>
+        </div>
+        <div class="card">
+            <h3>Current Channels</h3>
+            <table>
+                {% for ch in settings.channels %}
+                <tr>
+                    <td>{{ ch.btn_name }}</td>
+                    <td style="font-size:11px; color:#888;">{{ ch.id }}</td>
+                    <td><button class="btn-del" onclick="delChan({{ loop.index0 }})">Delete</button></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" style="text-align:center; color:#888; padding:20px;">No channels added</td></tr>
+                {% endfor %}
+            </table>
+        </div>
     </div>
     
     <div id="admins" class="tab">
-        <div class="card"><h3>Manage Admins</h3><input id="newAdmin" placeholder="Telegram ID"><button class="btn" onclick="addAdmin()">Add Admin</button></div>
-        <div class="card"><table>{% for adm in settings.admins %}<tr><td>{{ adm }}</td><td><button class="btn-del" onclick="remAdmin('{{ adm }}')">X</button></td></tr>{% endfor %}</table></div>
+        <div class="card">
+            <h3>Add Admin</h3>
+            <input id="newAdmin" placeholder="Telegram User ID (e.g. 1234567890)">
+            <button class="btn" onclick="addAdmin()">Add Admin</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">Main Admin ID: {{ ADMIN_ID }}</p>
+        </div>
+        <div class="card">
+            <h3>Current Admins</h3>
+            <table>
+                {% for adm in settings.admins %}
+                <tr>
+                    <td>{{ adm }}</td>
+                    <td><button class="btn-del" onclick="remAdmin('{{ adm }}')">Remove</button></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="2" style="text-align:center; color:#888; padding:20px;">No additional admins</td></tr>
+                {% endfor %}
+            </table>
+        </div>
     </div>
     
     <div id="gifts" class="tab">
@@ -1261,8 +1759,8 @@ ADMIN_TEMPLATE = """
                 <input id="giftCode" placeholder="Enter 5-character code" maxlength="5" style="text-transform:uppercase; flex:1;">
                 <button class="gen-btn" onclick="generateCode()">GENERATE</button>
             </div>
-            <label>Min Amount</label><input type="number" id="giftMin" value="10" step="0.01">
-            <label>Max Amount</label><input type="number" id="giftMax" value="50" step="0.01">
+            <label>Min Amount (₹)</label><input type="number" id="giftMin" value="10" step="0.01">
+            <label>Max Amount (₹)</label><input type="number" id="giftMax" value="50" step="0.01">
             <label>Expiry (Hours)</label><input type="number" id="giftExpiry" value="2">
             <label>Total Uses</label><input type="number" id="giftUses" value="1">
             <button class="btn" onclick="createGift()" style="background:#9d4edd;">Create Gift Code</button>
@@ -1278,8 +1776,8 @@ ADMIN_TEMPLATE = """
                         {% if gift.expired %}
                         EXPIRED
                         {% else %}
-                        {% set expiry_time = gift.expiry|string %}
-                        {% set remaining = (expiry_time|fromisoformat - now).total_seconds() / 60 %}
+                        {% set expiry_time = gift.expiry|fromisoformat %}
+                        {% set remaining = (expiry_time - now).total_seconds() / 60 %}
                         Expires in: {{ remaining|int }} mins
                         {% endif %}
                     </div>
@@ -1289,43 +1787,390 @@ ADMIN_TEMPLATE = """
                     <div style="font-size:11px; color:#0f0;">₹{{ gift.min_amount }} - ₹{{ gift.max_amount }}</div>
                 </div>
                 <div>
-                    <button class="btn-icon" style="background:#ff9800;" onclick="toggleGift('{{ gift.code }}')">
+                    <button class="btn-icon" style="background:#ff9800;" onclick="toggleGift('{{ gift.code }}')" title="Toggle Active">
                         {% if gift.is_active %}⏸{% else %}▶{% endif %}
                     </button>
-                    <button class="btn-icon cross" onclick="deleteGift('{{ gift.code }}')">✘</button>
+                    <button class="btn-icon cross" onclick="deleteGift('{{ gift.code }}')" title="Delete">✘</button>
                 </div>
             </div>
+            {% else %}
+            <div style="text-align:center; color:#888; padding:20px;">No gift codes created</div>
             {% endfor %}
         </div>
     </div>
     
     <div id="bc" class="tab">
-        <div class="card"><textarea id="bcMsg" placeholder="Message" rows="5"></textarea><input type="file" id="bcFile"><button class="btn" onclick="sendBC()">Broadcast Message</button></div>
+        <div class="card">
+            <h3>Broadcast Message</h3>
+            <textarea id="bcMsg" placeholder="Enter message to send to all users" rows="5"></textarea>
+            <input type="file" id="bcFile" accept="image/*">
+            <button class="btn" onclick="sendBC()">Broadcast to All Users</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">This will send to {{ stats.total_users }} users</p>
+        </div>
     </div>
     
     <script>
-        let curTx='';
-        function tab(n){document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById(n).classList.add('active');document.querySelectorAll('.nav button').forEach(e=>e.classList.remove('active'));event.target.classList.add('active');}
-        function saveBasic(){fetch('/admin/update_basic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bot_name:document.getElementById('bName').value,min_withdrawal:document.getElementById('minW').value,welcome_bonus:document.getElementById('bonus').value,min_refer_reward:document.getElementById('minRef').value,max_refer_reward:document.getElementById('maxRef').value,bots_disabled:document.getElementById('dis').checked,auto_withdraw:document.getElementById('auto').checked,ignore_device_check:document.getElementById('idevice').checked,withdraw_disabled:document.getElementById('withdraw_disabled').checked})}).then(r=>r.json()).then(data=>{if(data.ok){alert("Saved!");}else{alert("Error");}}).catch(err=>alert("Error saving"));}
-        function addChan(){fetch('/admin/channels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name:document.getElementById('cName').value,link:document.getElementById('cLink').value,id:document.getElementById('cId').value})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert("Error");}}).catch(err=>alert("Error adding"));}
-        function delChan(i){fetch('/admin/channels',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',index:i})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert("Error");}}).catch(err=>alert("Error deleting"));}
-        function addAdmin(){const adminId=document.getElementById('newAdmin').value.trim();if(!adminId){alert("Enter ID");return;}fetch('/admin/manage_admins',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',id:adminId})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert("Error");}}).catch(err=>alert("Error adding"));}
-        function remAdmin(id){if(!confirm('Remove admin?'))return;fetch('/admin/manage_admins',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',id:id})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert("Error");}}).catch(err=>alert("Error removing"));}
-        function openApprove(id){curTx=id;document.getElementById('approveModal').style.display='flex'}
-        function confirmApprove(){const u=document.getElementById('utrInput').value;if(!u)return alert("Enter UTR");proc(curTx,'completed',u)}
-        function proc(i,s,u=''){fetch('/admin/process_withdraw',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tx_id:i,status:s,utr:u})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert("Error");}}).catch(err=>alert("Error processing"));}
-        function sendBC(){const fd=new FormData();fd.append('text',document.getElementById('bcMsg').value);fd.append('image',document.getElementById('bcFile').files[0]);fetch('/admin/broadcast',{method:'POST',body:fd}).then(r=>r.json()).then(data=>{alert("Sent to "+data.count+" users");}).catch(err=>alert("Error broadcasting"));}
-        function upLogo(){const fd=new FormData();fd.append('logo',document.getElementById('logoFile').files[0]);fetch('/admin/upload_logo',{method:'POST',body:fd}).then(r=>r.json()).then(data=>{if(data.ok){alert("Logo uploaded!");}else{alert("Error");}}).catch(err=>alert("Error uploading"));}
-        function search(e){const v=e.value.toLowerCase();document.querySelectorAll('#uTable tr').forEach((r,i)=>{if(i>0)r.style.display=r.innerText.toLowerCase().includes(v)?'':'none';});}
-        function generateCode(){const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';let code='';for(let i=0;i<5;i++){code+=chars.charAt(Math.floor(Math.random()*chars.length));}document.getElementById('giftCode').value=code;}
-        function createGift(){const code=document.getElementById('giftCode').value.toUpperCase();const minAmt=document.getElementById('giftMin').value;const maxAmt=document.getElementById('giftMax').value;const expiry=document.getElementById('giftExpiry').value;const uses=document.getElementById('giftUses').value;if(!code||code.length!==5){alert('Enter 5-character code');return;}if(parseFloat(minAmt)>=parseFloat(maxAmt)){alert('Max must be > min');return;}fetch('/admin/create_gift?user_id={{ admin_id }}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_generate:false,code:code,min_amount:minAmt,max_amount:maxAmt,expiry_hours:expiry,total_uses:uses})}).then(r=>r.json()).then(data=>{if(data.ok){alert('Gift code created: '+data.code);location.reload();}else{alert('Error: '+data.msg);}}).catch(err=>alert('Error creating'));}
-        function toggleGift(code){fetch('/admin/toggle_gift',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code,action:'toggle'})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert('Error');}}).catch(err=>alert('Error toggling'));}
-        function deleteGift(code){if(!confirm('Delete gift code?'))return;fetch('/admin/toggle_gift',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code,action:'delete'})}).then(r=>r.json()).then(data=>{if(data.ok){location.reload();}else{alert('Error');}}).catch(err=>alert('Error deleting'));}
+        let curTx = '';
+        
+        function tab(n) {
+            document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
+            document.getElementById(n).classList.add('active');
+            document.querySelectorAll('.nav button').forEach(e => e.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+        
+        function saveBasic() {
+            const data = {
+                bot_name: document.getElementById('bName').value,
+                min_withdrawal: parseFloat(document.getElementById('minW').value),
+                welcome_bonus: parseFloat(document.getElementById('bonus').value),
+                min_refer_reward: parseFloat(document.getElementById('minRef').value),
+                max_refer_reward: parseFloat(document.getElementById('maxRef').value),
+                bots_disabled: document.getElementById('dis').checked,
+                auto_withdraw: document.getElementById('auto').checked,
+                ignore_device_check: document.getElementById('idevice').checked,
+                withdraw_disabled: document.getElementById('withdraw_disabled').checked
+            };
+            
+            fetch('/admin/update_basic', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Settings saved successfully!');
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error saving settings');
+                console.error(err);
+            });
+        }
+        
+        function addChan() {
+            const data = {
+                action: 'add',
+                name: document.getElementById('cName').value,
+                link: document.getElementById('cLink').value,
+                id: document.getElementById('cId').value
+            };
+            
+            if (!data.name || !data.link) {
+                alert('Please fill channel name and link');
+                return;
+            }
+            
+            fetch('/admin/channels', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error adding channel');
+                console.error(err);
+            });
+        }
+        
+        function delChan(index) {
+            if (!confirm('Delete this channel?')) return;
+            
+            fetch('/admin/channels', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'delete', index: index})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error deleting channel');
+                }
+            })
+            .catch(err => {
+                alert('Error deleting channel');
+                console.error(err);
+            });
+        }
+        
+        function addAdmin() {
+            const adminId = document.getElementById('newAdmin').value.trim();
+            if (!adminId) {
+                alert('Please enter Telegram User ID');
+                return;
+            }
+            
+            fetch('/admin/manage_admins', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'add', id: adminId})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error adding admin');
+                console.error(err);
+            });
+        }
+        
+        function remAdmin(id) {
+            if (!confirm('Remove this admin?')) return;
+            
+            fetch('/admin/manage_admins', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'remove', id: id})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error removing admin');
+                }
+            })
+            .catch(err => {
+                alert('Error removing admin');
+                console.error(err);
+            });
+        }
+        
+        function openApprove(id) {
+            curTx = id;
+            document.getElementById('approveModal').style.display = 'flex';
+            document.getElementById('utrInput').focus();
+        }
+        
+        function confirmApprove() {
+            const utr = document.getElementById('utrInput').value.trim();
+            if (!utr) {
+                alert('Please enter UTR number');
+                return;
+            }
+            
+            proc(curTx, 'completed', utr);
+            document.getElementById('approveModal').style.display = 'none';
+            document.getElementById('utrInput').value = '';
+        }
+        
+        function proc(txId, status, utr = '') {
+            fetch('/admin/process_withdraw', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tx_id: txId, status: status, utr: utr})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error processing withdrawal');
+                console.error(err);
+            });
+        }
+        
+        function sendBC() {
+            const message = document.getElementById('bcMsg').value;
+            if (!message.trim()) {
+                alert('Please enter a message');
+                return;
+            }
+            
+            if (!confirm(`Send this message to {{ stats.total_users }} users?`)) return;
+            
+            const formData = new FormData();
+            formData.append('text', message);
+            const fileInput = document.getElementById('bcFile');
+            if (fileInput.files[0]) {
+                formData.append('image', fileInput.files[0]);
+            }
+            
+            fetch('/admin/broadcast', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok !== false) {
+                    alert(`Message sent to ${data.count || data} users!`);
+                    document.getElementById('bcMsg').value = '';
+                    document.getElementById('bcFile').value = '';
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error broadcasting message');
+                console.error(err);
+            });
+        }
+        
+        function upLogo() {
+            const fileInput = document.getElementById('logoFile');
+            if (!fileInput.files[0]) {
+                alert('Please select a logo file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('logo', fileInput.files[0]);
+            
+            fetch('/admin/upload_logo', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Logo uploaded successfully!');
+                    fileInput.value = '';
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error uploading logo');
+                console.error(err);
+            });
+        }
+        
+        function searchUsers(input) {
+            const value = input.value.toLowerCase();
+            const rows = document.querySelectorAll('#uTable tr');
+            
+            for (let i = 1; i < rows.length; i++) {
+                const row = rows[i];
+                const text = row.textContent.toLowerCase();
+                row.style.display = text.includes(value) ? '' : 'none';
+            }
+        }
+        
+        function generateCode() {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            let code = '';
+            for (let i = 0; i < 5; i++) {
+                code += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            document.getElementById('giftCode').value = code;
+        }
+        
+        function createGift() {
+            const code = document.getElementById('giftCode').value.toUpperCase();
+            const minAmt = document.getElementById('giftMin').value;
+            const maxAmt = document.getElementById('giftMax').value;
+            const expiry = document.getElementById('giftExpiry').value;
+            const uses = document.getElementById('giftUses').value;
+            
+            if (!code || code.length !== 5) {
+                alert('Please enter a valid 5-character code');
+                return;
+            }
+            
+            if (parseFloat(minAmt) >= parseFloat(maxAmt)) {
+                alert('Max amount must be greater than min amount');
+                return;
+            }
+            
+            const data = {
+                auto_generate: false,
+                code: code,
+                min_amount: minAmt,
+                max_amount: maxAmt,
+                expiry_hours: expiry,
+                total_uses: uses
+            };
+            
+            fetch('/admin/create_gift?user_id={{ admin_id }}', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Gift code created: ' + data.code);
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.msg);
+                }
+            })
+            .catch(err => {
+                alert('Error creating gift code');
+                console.error(err);
+            });
+        }
+        
+        function toggleGift(code) {
+            fetch('/admin/toggle_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code: code, action: 'toggle'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error toggling gift code');
+                console.error(err);
+            });
+        }
+        
+        function deleteGift(code) {
+            if (!confirm('Delete this gift code?')) return;
+            
+            fetch('/admin/toggle_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code: code, action: 'delete'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error deleting gift code');
+                console.error(err);
+            });
+        }
+        
+        // Generate initial code
         generateCode();
     </script>
 </body>
 </html>
 """
+
 # ==================== 9. START APP ====================
 if __name__ == '__main__':
     # Initialize default files
