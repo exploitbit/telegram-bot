@@ -1682,6 +1682,613 @@ MINI_APP_TEMPLATE = """
 </body>
 </html>
 """
+ADMIN_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Panel</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { background: #111; color: #ddd; font-family: sans-serif; margin: 0; padding-bottom: 50px; }
+        .nav { background: #222; padding: 10px; display: flex; overflow-x: auto; gap: 10px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; }
+        .nav button { background: none; border: none; color: #888; padding: 10px; font-weight: bold; cursor: pointer; white-space: nowrap; border-radius: 5px; }
+        .nav button.active { background: #007bff; color: white; }
+        .tab { display: none; padding: 15px; } .tab.active { display: block; }
+        .card { background: #222; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+        input, select, textarea { width: 100%; padding: 10px; background: #333; border: 1px solid #444; color: white; margin: 5px 0; border-radius: 5px; box-sizing: border-box; }
+        .btn { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 5px; margin-top: 10px; font-weight: bold; cursor: pointer;}
+        .btn-del { width: auto; background: #dc3545; padding: 5px 10px; margin: 0; font-size: 12px; cursor: pointer;}
+        .btn-icon { width:35px; height:35px; border-radius:5px; border:none; cursor:pointer; font-weight:bold; font-size:16px; margin-left:5px; display:inline-flex; align-items:center; justify-content:center; }
+        .check { background:#28a745; color:white; } .cross { background:#dc3545; color:white; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; } 
+        th { text-align: left; color: #888; border-bottom: 1px solid #444; padding:8px; } 
+        td { padding: 8px; border-bottom: 1px solid #333; vertical-align: middle; }
+        .tx-id { font-weight:bold; color:#007bff; display:block; }
+        .u-info { font-size:11px; color:#aaa; display:block; }
+        .paid-utr { font-family:monospace; color:#28a745; background:rgba(40,167,69,0.1); padding:2px 5px; border-radius:4px; font-size:11px; }
+        .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); justify-content:center; align-items:center; z-index:999; }
+        .m-content { background:#222; padding:20px; border-radius:10px; border:1px solid #444; width:90%; max-width:300px; text-align:center; }
+        .gift-row { background: rgba(157,78,221,0.1); margin: 5px 0; padding: 10px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .gift-code { font-family: monospace; font-weight: bold; color: #9d4edd; }
+        .expiry { font-size: 11px; color: #ff9800; }
+        .usage { font-size: 12px; color: #aaa; }
+        .nowrap { white-space: nowrap; }
+        .expired { opacity: 0.5; text-decoration: line-through; }
+        .gen-btn { background: #9d4edd; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 12px; margin-left: 10px; }
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <button class="active" onclick="tab('dash')">Stats</button>
+        <button onclick="tab('withs')">Withdraws</button>
+        <button onclick="tab('users')">Users</button>
+        <button onclick="tab('sets')">Config</button>
+        <button onclick="tab('chans')">Channels</button>
+        <button onclick="tab('admins')">Admins</button>
+        <button onclick="tab('gifts')">Gift Codes</button>
+        <button onclick="tab('bc')">Broadcast</button>
+    </div>
+    
+    <div id="approveModal" class="modal"><div class="m-content"><h3>Enter UTR</h3><input id="utrInput" placeholder="UTR Number"><button class="btn" style="background:#28a745" onclick="confirmApprove()">Confirm Pay</button><button class="btn" style="background:transparent; color:#f44" onclick="document.getElementById('approveModal').style.display='none'">Cancel</button></div></div>
+    
+    <div id="dash" class="tab active">
+        <div class="card">
+            <h3>Total Users: <span style="color:#007bff">{{ stats.total_users }}</span></h3>
+            <h3>Pending Withdrawals: <span style="color:#ffc107">{{ stats.pending_count }}</span></h3>
+            <h3>Active Gift Codes: <span style="color:#9d4edd">{{ gifts|length }}</span></h3>
+        </div>
+    </div>
+    
+    <div id="withs" class="tab">
+        <div class="card" style="padding:0; overflow:hidden;">
+            <table style="width:100%;">
+                <tr style="background:#2a2a30;">
+                    <th>Request Info</th>
+                    <th style="text-align:right;">Action</th>
+                </tr>
+                {% for w in withdrawals %}
+                <tr>
+                    <td>
+                        <span class="tx-id">{{ w.tx_id }}</span>
+                        <span class="u-info">ID: {{ w.user_id }}</span>
+                        <div style="color:#ffc107; font-weight:bold; margin-top:2px;">₹{{ w.amount }}</div>
+                        <div style="font-size:10px; color:#888;">{{ w.upi }}</div>
+                    </td>
+                    <td style="text-align:right;">
+                        {% if w.status == 'pending' %}
+                        <button class="btn-icon check" onclick="openApprove('{{ w.tx_id }}')">✔</button>
+                        <button class="btn-icon cross" onclick="proc('{{ w.tx_id }}','rejected')">✘</button>
+                        {% elif w.status == 'completed' %}
+                        <span class="paid-utr">{{ w.utr }}</span>
+                        {% else %}
+                        <span style="color:#dc3545; font-size:11px;">REJECTED</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+
+    <div id="users" class="tab">
+        <div class="card">
+            <input placeholder="Search by name or ID" onkeyup="searchUsers(this)">
+            <table id="uTable">
+                <tr><th>ID</th><th>Name</th><th>Bal</th><th>Refers</th><th>Code</th><th>Verified</th></tr>
+                {% for uid, u in users.items() %}
+                <tr>
+                    <td class="nowrap">{{ uid[:8] }}...</td>
+                    <td>{{ u.name }}</td>
+                    <td>{{ "%.2f"|format(u.balance) }}</td>
+                    <td>{{ u.referred_users|length if u.referred_users else 0 }}</td>
+                    <td style="font-family:monospace; font-size:11px;">{{ u.refer_code if u.refer_code else 'N/A' }}</td>
+                    <td>{% if u.verified %}✅{% else %}❌{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    
+    <div id="sets" class="tab">
+        <div class="card">
+            <label>Bot Name</label><input id="bName" value="{{ settings.bot_name }}">
+            <label>Min Withdraw (₹)</label><input type="number" id="minW" value="{{ settings.min_withdrawal }}">
+            <label>Welcome Bonus (₹)</label><input type="number" id="bonus" value="{{ settings.welcome_bonus }}">
+            <label>Min Refer Reward (₹)</label><input type="number" id="minRef" value="{{ settings.min_refer_reward }}">
+            <label>Max Refer Reward (₹)</label><input type="number" id="maxRef" value="{{ settings.max_refer_reward }}">
+            <div style="margin:10px 0">
+                <input type="checkbox" id="dis" style="width:auto" {{ 'checked' if settings.bots_disabled else '' }}> 
+                <label for="dis">Disable Bot for Users</label>
+            </div>
+            <div style="margin:10px 0">
+                <input type="checkbox" id="auto" style="width:auto" {{ 'checked' if settings.auto_withdraw else '' }}> 
+                <label for="auto">Auto-Withdraw (Instant Payment)</label>
+            </div>
+            <div style="margin:10px 0">
+                <input type="checkbox" id="idevice" style="width:auto" {{ 'checked' if settings.ignore_device_check else '' }}> 
+                <label for="idevice">Allow Same Device Multiple Accounts</label>
+            </div>
+            <div style="margin:10px 0">
+                <input type="checkbox" id="withdraw_disabled" style="width:auto" {{ 'checked' if settings.withdraw_disabled else '' }}> 
+                <label for="withdraw_disabled">Disable Withdrawals</label>
+            </div>
+            <button class="btn" onclick="saveBasic()">Save Settings</button>
+        </div>
+        <div class="card">
+            <h3>Upload Logo</h3>
+            <input type="file" id="logoFile" accept="image/*">
+            <button class="btn" onclick="upLogo()">Upload Logo</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">Current: {{ settings.logo_filename }}</p>
+        </div>
+    </div>
+    
+    <div id="chans" class="tab">
+        <div class="card">
+            <h3>Add Channel</h3>
+            <input id="cName" placeholder="Channel Name (e.g. News Channel)">
+            <input id="cLink" placeholder="Channel Link (https://t.me/...)">
+            <input id="cId" placeholder="Channel ID (e.g. @channelusername)">
+            <button class="btn" onclick="addChan()">Add Channel</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">Users must join these channels to verify</p>
+        </div>
+        <div class="card">
+            <h3>Current Channels</h3>
+            <table>
+                {% for ch in settings.channels %}
+                <tr>
+                    <td>{{ ch.btn_name }}</td>
+                    <td style="font-size:11px; color:#888;">{{ ch.id }}</td>
+                    <td><button class="btn-del" onclick="delChan({{ loop.index0 }})">Delete</button></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" style="text-align:center; color:#888; padding:20px;">No channels added</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    
+    <div id="admins" class="tab">
+        <div class="card">
+            <h3>Add Admin</h3>
+            <input id="newAdmin" placeholder="Telegram User ID (e.g. 1234567890)">
+            <button class="btn" onclick="addAdmin()">Add Admin</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">Main Admin ID: {{ ADMIN_ID }}</p>
+        </div>
+        <div class="card">
+            <h3>Current Admins</h3>
+            <table>
+                {% for adm in settings.admins %}
+                <tr>
+                    <td>{{ adm }}</td>
+                    <td><button class="btn-del" onclick="remAdmin('{{ adm }}')">Remove</button></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="2" style="text-align:center; color:#888; padding:20px;">No additional admins</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+    
+    <div id="gifts" class="tab">
+        <div class="card">
+            <h3>Create Gift Code</h3>
+            <div style="display:flex; align-items:center; margin:10px 0;">
+                <input id="giftCode" placeholder="Enter 5-character code" maxlength="5" style="text-transform:uppercase; flex:1;">
+                <button class="gen-btn" onclick="generateCode()">GENERATE</button>
+            </div>
+            <label>Min Amount (₹)</label><input type="number" id="giftMin" value="10" step="0.01">
+            <label>Max Amount (₹)</label><input type="number" id="giftMax" value="50" step="0.01">
+            <label>Expiry (Hours)</label><input type="number" id="giftExpiry" value="2">
+            <label>Total Uses</label><input type="number" id="giftUses" value="1">
+            <button class="btn" onclick="createGift()" style="background:#9d4edd;">Create Gift Code</button>
+        </div>
+        
+        <div class="card">
+            <h3>Active Gift Codes</h3>
+            {% for gift in gifts %}
+            <div class="gift-row {% if gift.expired %}expired{% endif %}">
+                <div>
+                    <div class="gift-code">{{ gift.code }}</div>
+                    <div class="expiry">
+                        {% if gift.expired %}
+                        EXPIRED
+                        {% else %}
+                        {% set expiry_time = gift.expiry|fromisoformat %}
+                        {% set remaining = (expiry_time - now).total_seconds() / 60 %}
+                        Expires in: {{ remaining|int }} mins
+                        {% endif %}
+                    </div>
+                </div>
+                <div style="text-align:center;">
+                    <div class="usage">{{ gift.used_by|length }}/{{ gift.total_uses }} uses</div>
+                    <div style="font-size:11px; color:#0f0;">₹{{ gift.min_amount }} - ₹{{ gift.max_amount }}</div>
+                </div>
+                <div>
+                    <button class="btn-icon" style="background:#ff9800;" onclick="toggleGift('{{ gift.code }}')" title="Toggle Active">
+                        {% if gift.is_active %}⏸{% else %}▶{% endif %}
+                    </button>
+                    <button class="btn-icon cross" onclick="deleteGift('{{ gift.code }}')" title="Delete">✘</button>
+                </div>
+            </div>
+            {% else %}
+            <div style="text-align:center; color:#888; padding:20px;">No gift codes created</div>
+            {% endfor %}
+        </div>
+    </div>
+    
+    <div id="bc" class="tab">
+        <div class="card">
+            <h3>Broadcast Message</h3>
+            <textarea id="bcMsg" placeholder="Enter message to send to all users" rows="5"></textarea>
+            <input type="file" id="bcFile" accept="image/*">
+            <button class="btn" onclick="sendBC()">Broadcast to All Users</button>
+            <p style="font-size:12px; color:#888; margin-top:10px;">This will send to {{ stats.total_users }} users</p>
+        </div>
+    </div>
+    
+    <script>
+        let curTx = '';
+        
+        function tab(n) {
+            document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
+            document.getElementById(n).classList.add('active');
+            document.querySelectorAll('.nav button').forEach(e => e.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+        
+        function saveBasic() {
+            const data = {
+                bot_name: document.getElementById('bName').value,
+                min_withdrawal: parseFloat(document.getElementById('minW').value),
+                welcome_bonus: parseFloat(document.getElementById('bonus').value),
+                min_refer_reward: parseFloat(document.getElementById('minRef').value),
+                max_refer_reward: parseFloat(document.getElementById('maxRef').value),
+                bots_disabled: document.getElementById('dis').checked,
+                auto_withdraw: document.getElementById('auto').checked,
+                ignore_device_check: document.getElementById('idevice').checked,
+                withdraw_disabled: document.getElementById('withdraw_disabled').checked
+            };
+            
+            fetch('/admin/update_basic', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Settings saved successfully!');
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error saving settings');
+                console.error(err);
+            });
+        }
+        
+        function addChan() {
+            const data = {
+                action: 'add',
+                name: document.getElementById('cName').value,
+                link: document.getElementById('cLink').value,
+                id: document.getElementById('cId').value
+            };
+            
+            if (!data.name || !data.link) {
+                alert('Please fill channel name and link');
+                return;
+            }
+            
+            fetch('/admin/channels', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error adding channel');
+                console.error(err);
+            });
+        }
+        
+        function delChan(index) {
+            if (!confirm('Delete this channel?')) return;
+            
+            fetch('/admin/channels', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'delete', index: index})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error deleting channel');
+                }
+            })
+            .catch(err => {
+                alert('Error deleting channel');
+                console.error(err);
+            });
+        }
+        
+        function addAdmin() {
+            const adminId = document.getElementById('newAdmin').value.trim();
+            if (!adminId) {
+                alert('Please enter Telegram User ID');
+                return;
+            }
+            
+            fetch('/admin/manage_admins', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'add', id: adminId})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error adding admin');
+                console.error(err);
+            });
+        }
+        
+        function remAdmin(id) {
+            if (!confirm('Remove this admin?')) return;
+            
+            fetch('/admin/manage_admins', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'remove', id: id})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error removing admin');
+                }
+            })
+            .catch(err => {
+                alert('Error removing admin');
+                console.error(err);
+            });
+        }
+        
+        function openApprove(id) {
+            curTx = id;
+            document.getElementById('approveModal').style.display = 'flex';
+            document.getElementById('utrInput').focus();
+        }
+        
+        function confirmApprove() {
+            const utr = document.getElementById('utrInput').value.trim();
+            if (!utr) {
+                alert('Please enter UTR number');
+                return;
+            }
+            
+            proc(curTx, 'completed', utr);
+            document.getElementById('approveModal').style.display = 'none';
+            document.getElementById('utrInput').value = '';
+        }
+        
+        function proc(txId, status, utr = '') {
+            fetch('/admin/process_withdraw', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({tx_id: txId, status: status, utr: utr})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error processing withdrawal');
+                console.error(err);
+            });
+        }
+        
+        function sendBC() {
+            const message = document.getElementById('bcMsg').value;
+            if (!message.trim()) {
+                alert('Please enter a message');
+                return;
+            }
+            
+            if (!confirm(`Send this message to {{ stats.total_users }} users?`)) return;
+            
+            const formData = new FormData();
+            formData.append('text', message);
+            const fileInput = document.getElementById('bcFile');
+            if (fileInput.files[0]) {
+                formData.append('image', fileInput.files[0]);
+            }
+            
+            fetch('/admin/broadcast', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok !== false) {
+                    alert(`Message sent to ${data.count || data} users!`);
+                    document.getElementById('bcMsg').value = '';
+                    document.getElementById('bcFile').value = '';
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error broadcasting message');
+                console.error(err);
+            });
+        }
+        
+        function upLogo() {
+            const fileInput = document.getElementById('logoFile');
+            if (!fileInput.files[0]) {
+                alert('Please select a logo file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('logo', fileInput.files[0]);
+            
+            fetch('/admin/upload_logo', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Logo uploaded successfully!');
+                    fileInput.value = '';
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error uploading logo');
+                console.error(err);
+            });
+        }
+        
+        function searchUsers(input) {
+            const value = input.value.toLowerCase();
+            const rows = document.querySelectorAll('#uTable tr');
+            
+            for (let i = 1; i < rows.length; i++) {
+                const row = rows[i];
+                const text = row.textContent.toLowerCase();
+                row.style.display = text.includes(value) ? '' : 'none';
+            }
+        }
+        
+        function generateCode() {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            let code = '';
+            for (let i = 0; i < 5; i++) {
+                code += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            document.getElementById('giftCode').value = code;
+        }
+        
+        function createGift() {
+            const code = document.getElementById('giftCode').value.toUpperCase();
+            const minAmt = document.getElementById('giftMin').value;
+            const maxAmt = document.getElementById('giftMax').value;
+            const expiry = document.getElementById('giftExpiry').value;
+            const uses = document.getElementById('giftUses').value;
+            
+            if (!code || code.length !== 5) {
+                alert('Please enter a valid 5-character code');
+                return;
+            }
+            
+            if (parseFloat(minAmt) >= parseFloat(maxAmt)) {
+                alert('Max amount must be greater than min amount');
+                return;
+            }
+            
+            const data = {
+                auto_generate: false,
+                code: code,
+                min_amount: minAmt,
+                max_amount: maxAmt,
+                expiry_hours: expiry,
+                total_uses: uses
+            };
+            
+            fetch('/admin/create_gift?user_id={{ admin_id }}', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    alert('Gift code created: ' + data.code);
+                    location.reload();
+                } else {
+                    alert('Error: ' + data.msg);
+                }
+            })
+            .catch(err => {
+                alert('Error creating gift code');
+                console.error(err);
+            });
+        }
+        
+        function toggleGift(code) {
+            fetch('/admin/toggle_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code: code, action: 'toggle'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error toggling gift code');
+                console.error(err);
+            });
+        }
+        
+        function deleteGift(code) {
+            if (!confirm('Delete this gift code?')) return;
+            
+            fetch('/admin/toggle_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code: code, action: 'delete'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.msg || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error deleting gift code');
+                console.error(err);
+            });
+        }
+        
+        // Generate initial code
+        generateCode();
+    </script>
+</body>
+</html>
+"""
+
+
 
 # ==================== 10. START APP ====================
 if __name__ == '__main__':
