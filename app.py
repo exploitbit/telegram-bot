@@ -12,6 +12,7 @@ import string
 import requests
 import re
 from werkzeug.utils import secure_filename
+import urllib.parse
 
 # ==================== 1. RAILWAY CONFIGURATION ====================
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8295150408:AAF1P_IcRG-z8L54PNzZVFKNXts0Uwy0TtY')
@@ -281,7 +282,13 @@ def handle_start(message):
                 safe_send_message(adm, msg)
         
         display_name = message.from_user.first_name or "USER"
-        img_url = f"https://res.cloudinary.com/dneusgyzc/image/upload/l_text:Stalinist%20One_90_bold_center:{display_name},co_white,g_center/v1767253426/botpy_fdkyke.jpg"
+        # Remove emojis and encode for URL
+        display_name_clean = re.sub(r'[^\w\s]', '', display_name)
+        if not display_name_clean.strip():
+            display_name_clean = "USER"
+        display_name_encoded = urllib.parse.quote(display_name_clean)
+        
+        img_url = f"https://res.cloudinary.com/dneusgyzc/image/upload/l_text:Stalinist%20One_130_bold_center:{display_name_encoded},co_white,g_center/v1767253426/botpy_fdkyke.jpg"
         
         markup = InlineKeyboardMarkup(row_width=1)
         for ch in settings['channels']:
@@ -333,6 +340,20 @@ def mini_app():
     except Exception as e:
         logger.error(f"Mini app error: {e}")
         return "Internal Server Error", 500
+
+@app.route('/get_pfp')
+def get_pfp():
+    uid = request.args.get('uid')
+    try:
+        photos = bot.get_user_profile_photos(uid)
+        if photos.total_count > 0:
+            file_id = photos.photos[0][0].file_id
+            file_info = bot.get_file(file_id)
+            dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+            return Response(requests.get(dl_url).content, mimetype='image/jpeg')
+    except Exception as e:
+        logger.error(f"PFP error: {e}")
+    return "No Image", 404
 
 @app.route('/api/verify', methods=['POST'])
 def api_verify():
@@ -866,6 +887,217 @@ def admin_panel():
     except Exception as e:
         logger.error(f"Admin panel error: {e}")
         return f"Internal Server Error: {str(e)}", 500
+
+@app.route('/admin/update_basic', methods=['POST'])
+def admin_update_basic():
+    try:
+        s = get_settings()
+        d = request.json
+        
+        try:
+            s['min_withdrawal'] = float(d.get('min_withdrawal', 100))
+            s['welcome_bonus'] = float(d.get('welcome_bonus', 50))
+            s['min_refer_reward'] = float(d.get('min_refer_reward', 10))
+            s['max_refer_reward'] = float(d.get('max_refer_reward', 50))
+        except:
+            pass
+        
+        for k in ['bot_name','bots_disabled','auto_withdraw','ignore_device_check','withdraw_disabled']:
+            if k in d:
+                s[k] = d[k]
+        
+        save_json(SETTINGS_FILE, s)
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"Update basic error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/manage_admins', methods=['POST'])
+def admin_manage_admins():
+    try:
+        d = request.json
+        s = get_settings()
+        if 'admins' not in s: 
+            s['admins'] = []
+        
+        tid = str(d.get('id', '')).strip()
+        action = d.get('action', '')
+        
+        if action == 'add':
+            if tid and tid != str(ADMIN_ID) and tid not in s['admins']:
+                s['admins'].append(tid)
+        elif action == 'remove':
+            if tid in s['admins']:
+                s['admins'].remove(tid)
+                
+        save_json(SETTINGS_FILE, s)
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"Manage admins error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/channels', methods=['POST'])
+def admin_channels():
+    try:
+        d = request.json
+        s = get_settings()
+        action = d.get('action', '')
+        
+        if action == 'add':
+            s['channels'].append({
+                "btn_name": d.get('name', 'Channel'),
+                "link": d.get('link', '#'),
+                "id": d.get('id', '')
+            })
+        elif action == 'delete':
+            index = int(d.get('index', 0))
+            if 0 <= index < len(s['channels']):
+                del s['channels'][index]
+        
+        save_json(SETTINGS_FILE, s)
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"Channels error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/process_withdraw', methods=['POST'])
+def admin_process_withdraw():
+    try:
+        d = request.json
+        w_list = load_json(WITHDRAWALS_FILE, [])
+        
+        for w in w_list:
+            if w.get('tx_id') == d.get('tx_id') and w.get('status') == 'pending':
+                w['status'] = d.get('status', '')
+                w['utr'] = d.get('utr', '')
+                
+                if d.get('status') == 'completed': 
+                    safe_send_message(w['user_id'], f"✅ *Withdrawal Paid!*\nAmt: ₹{w['amount']}\nUTR: `{w['utr']}`\nTxID: `{w['tx_id']}`")
+                else:
+                    users = load_json(USERS_FILE, {})
+                    if w['user_id'] in users:
+                        users[w['user_id']]['balance'] = float(users[w['user_id']].get('balance', 0)) + float(w['amount'])
+                        save_json(USERS_FILE, users)
+                        safe_send_message(w['user_id'], f"❌ *Withdrawal Rejected*\nAmt: ₹{w['amount']}\nRefunded to balance.\nTxID: `{w['tx_id']}`")
+                break
+                
+        save_json(WITHDRAWALS_FILE, w_list)
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"Process withdraw error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/upload_logo', methods=['POST'])
+def admin_logo():
+    try:
+        if 'logo' in request.files:
+            f = request.files['logo']
+            f.save(os.path.join(STATIC_DIR, "logo_custom.png"))
+            s = get_settings()
+            s['logo_filename'] = "logo_custom.png"
+            save_json(SETTINGS_FILE, s)
+            return jsonify({'ok': True})
+        return jsonify({'ok': False, 'msg': 'No file uploaded'})
+    except Exception as e:
+        logger.error(f"Upload logo error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/broadcast', methods=['POST'])
+def admin_broadcast():
+    try:
+        txt = request.form.get('text', '')
+        f = request.files.get('image')
+        users = load_json(USERS_FILE, {})
+        cnt = 0
+        
+        if f:
+            filename = secure_filename(f.filename)
+            path = os.path.join(UPLOAD_FOLDER, filename)
+            f.save(path)
+            
+            with open(path, 'rb') as img:
+                idata = img.read()
+                for u in users:
+                    try: 
+                        bot.send_photo(u, idata, caption=txt)
+                        cnt += 1
+                    except: 
+                        pass
+            os.remove(path)
+        else:
+            for u in users:
+                try: 
+                    bot.send_message(u, txt)
+                    cnt += 1
+                except: 
+                    pass
+        return jsonify({'count': cnt})
+    except Exception as e:
+        logger.error(f"Broadcast error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/create_gift', methods=['POST'])
+def admin_create_gift():
+    try:
+        data = request.json
+        code = data.get('code', '').strip().upper()
+        auto_gen = data.get('auto_generate', False)
+        
+        if auto_gen or not code:
+            code = generate_code(5)
+        elif len(code) != 5 or not code.isalnum():
+            return jsonify({'ok': False, 'msg': 'Code must be 5 alphanumeric characters'})
+        
+        gifts = load_json(GIFTS_FILE, [])
+        if any(g.get('code') == code for g in gifts):
+            return jsonify({'ok': False, 'msg': 'Code already exists'})
+        
+        expiry_hours = int(data.get('expiry_hours', 2))
+        expiry_time = datetime.now() + timedelta(hours=expiry_hours)
+        
+        gift = {
+            'code': code,
+            'min_amount': float(data.get('min_amount', 10)),
+            'max_amount': float(data.get('max_amount', 50)),
+            'expiry': expiry_time.isoformat(),
+            'total_uses': int(data.get('total_uses', 1)),
+            'used_by': [],
+            'is_active': True,
+            'expired': False,
+            'created_at': datetime.now().isoformat(),
+            'created_by': request.args.get('user_id', 'admin')
+        }
+        
+        gifts.append(gift)
+        save_json(GIFTS_FILE, gifts)
+        
+        return jsonify({'ok': True, 'code': code})
+    except Exception as e:
+        logger.error(f"Create gift error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/toggle_gift', methods=['POST'])
+def admin_toggle_gift():
+    try:
+        data = request.json
+        code = data.get('code')
+        action = data.get('action')
+        
+        gifts = load_json(GIFTS_FILE, [])
+        
+        for gift in gifts:
+            if gift.get('code') == code:
+                if action == 'toggle':
+                    gift['is_active'] = not gift.get('is_active', True)
+                elif action == 'delete':
+                    gifts.remove(gift)
+                break
+        
+        save_json(GIFTS_FILE, gifts)
+        return jsonify({'ok': True})
+    except Exception as e:
+        logger.error(f"Toggle gift error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
 
 # ==================== 8. SETUP ====================
 @app.route('/static/<path:filename>')
@@ -1682,6 +1914,7 @@ MINI_APP_TEMPLATE = """
 </body>
 </html>
 """
+
 ADMIN_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -1715,9 +1948,18 @@ ADMIN_TEMPLATE = """
         .nowrap { white-space: nowrap; }
         .expired { opacity: 0.5; text-decoration: line-through; }
         .gen-btn { background: #9d4edd; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 12px; margin-left: 10px; }
+        .admin-loader { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; justify-content: center; align-items: center; flex-direction: column; }
+        .admin-spinner { width: 40px; height: 40px; border: 5px solid #333; border-top: 5px solid #007bff; border-radius: 50%; animation: spin 1s linear infinite; margin: 20px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .admin-loader-text { color: white; font-weight: bold; font-size: 16px; margin-top: 15px; }
     </style>
 </head>
 <body>
+    <div id="adminLoader" class="admin-loader">
+        <div class="admin-spinner"></div>
+        <div id="adminLoaderText" class="admin-loader-text">Processing...</div>
+    </div>
+    
     <div class="nav">
         <button class="active" onclick="tab('dash')">Stats</button>
         <button onclick="tab('withs')">Withdraws</button>
@@ -1775,14 +2017,14 @@ ADMIN_TEMPLATE = """
             <input placeholder="Search by name or ID" onkeyup="searchUsers(this)">
             <table id="uTable">
                 <tr><th>ID</th><th>Name</th><th>Bal</th><th>Refers</th><th>Code</th><th>Verified</th></tr>
-                {% for uid, u in users.items() %}
+                {% for user in users %}
                 <tr>
-                    <td class="nowrap">{{ uid[:8] }}...</td>
-                    <td>{{ u.name }}</td>
-                    <td>{{ "%.2f"|format(u.balance) }}</td>
-                    <td>{{ u.referred_users|length if u.referred_users else 0 }}</td>
-                    <td style="font-family:monospace; font-size:11px;">{{ u.refer_code if u.refer_code else 'N/A' }}</td>
-                    <td>{% if u.verified %}✅{% else %}❌{% endif %}</td>
+                    <td class="nowrap">{{ user.id[:8] }}...</td>
+                    <td>{{ user.name }}</td>
+                    <td>{{ "%.2f"|format(user.balance) }}</td>
+                    <td>{{ user.refer_count }}</td>
+                    <td style="font-family:monospace; font-size:11px;">{{ user.refer_code if user.refer_code else 'N/A' }}</td>
+                    <td>{% if user.verified %}✅{% else %}❌{% endif %}</td>
                 </tr>
                 {% endfor %}
             </table>
@@ -1929,6 +2171,15 @@ ADMIN_TEMPLATE = """
     <script>
         let curTx = '';
         
+        function showAdminLoader(text = 'Processing...') {
+            document.getElementById('adminLoaderText').textContent = text;
+            document.getElementById('adminLoader').style.display = 'flex';
+        }
+        
+        function hideAdminLoader() {
+            document.getElementById('adminLoader').style.display = 'none';
+        }
+        
         function tab(n) {
             document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
             document.getElementById(n).classList.add('active');
@@ -1937,6 +2188,7 @@ ADMIN_TEMPLATE = """
         }
         
         function saveBasic() {
+            showAdminLoader('Saving settings...');
             const data = {
                 bot_name: document.getElementById('bName').value,
                 min_withdrawal: parseFloat(document.getElementById('minW').value),
@@ -1956,6 +2208,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     alert('Settings saved successfully!');
                 } else {
@@ -1963,12 +2216,14 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error saving settings');
                 console.error(err);
             });
         }
         
         function addChan() {
+            showAdminLoader('Adding channel...');
             const data = {
                 action: 'add',
                 name: document.getElementById('cName').value,
@@ -1977,6 +2232,7 @@ ADMIN_TEMPLATE = """
             };
             
             if (!data.name || !data.link) {
+                hideAdminLoader();
                 alert('Please fill channel name and link');
                 return;
             }
@@ -1988,6 +2244,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -1995,6 +2252,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error adding channel');
                 console.error(err);
             });
@@ -2003,6 +2261,8 @@ ADMIN_TEMPLATE = """
         function delChan(index) {
             if (!confirm('Delete this channel?')) return;
             
+            showAdminLoader('Deleting channel...');
+            
             fetch('/admin/channels', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2010,6 +2270,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -2017,14 +2278,17 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error deleting channel');
                 console.error(err);
             });
         }
         
         function addAdmin() {
+            showAdminLoader('Adding admin...');
             const adminId = document.getElementById('newAdmin').value.trim();
             if (!adminId) {
+                hideAdminLoader();
                 alert('Please enter Telegram User ID');
                 return;
             }
@@ -2036,6 +2300,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -2043,6 +2308,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error adding admin');
                 console.error(err);
             });
@@ -2051,6 +2317,8 @@ ADMIN_TEMPLATE = """
         function remAdmin(id) {
             if (!confirm('Remove this admin?')) return;
             
+            showAdminLoader('Removing admin...');
+            
             fetch('/admin/manage_admins', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2058,6 +2326,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -2065,6 +2334,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error removing admin');
                 console.error(err);
             });
@@ -2083,12 +2353,14 @@ ADMIN_TEMPLATE = """
                 return;
             }
             
+            showAdminLoader('Processing payment...');
             proc(curTx, 'completed', utr);
             document.getElementById('approveModal').style.display = 'none';
             document.getElementById('utrInput').value = '';
         }
         
         function proc(txId, status, utr = '') {
+            showAdminLoader(status === 'completed' ? 'Processing payment...' : 'Rejecting withdrawal...');
             fetch('/admin/process_withdraw', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2096,6 +2368,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -2103,6 +2376,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error processing withdrawal');
                 console.error(err);
             });
@@ -2117,6 +2391,8 @@ ADMIN_TEMPLATE = """
             
             if (!confirm(`Send this message to {{ stats.total_users }} users?`)) return;
             
+            showAdminLoader('Broadcasting message...');
+            
             const formData = new FormData();
             formData.append('text', message);
             const fileInput = document.getElementById('bcFile');
@@ -2130,6 +2406,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok !== false) {
                     alert(`Message sent to ${data.count || data} users!`);
                     document.getElementById('bcMsg').value = '';
@@ -2139,6 +2416,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error broadcasting message');
                 console.error(err);
             });
@@ -2151,6 +2429,8 @@ ADMIN_TEMPLATE = """
                 return;
             }
             
+            showAdminLoader('Uploading logo...');
+            
             const formData = new FormData();
             formData.append('logo', fileInput.files[0]);
             
@@ -2160,6 +2440,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     alert('Logo uploaded successfully!');
                     fileInput.value = '';
@@ -2168,6 +2449,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error uploading logo');
                 console.error(err);
             });
@@ -2194,6 +2476,7 @@ ADMIN_TEMPLATE = """
         }
         
         function createGift() {
+            showAdminLoader('Creating gift code...');
             const code = document.getElementById('giftCode').value.toUpperCase();
             const minAmt = document.getElementById('giftMin').value;
             const maxAmt = document.getElementById('giftMax').value;
@@ -2201,11 +2484,13 @@ ADMIN_TEMPLATE = """
             const uses = document.getElementById('giftUses').value;
             
             if (!code || code.length !== 5) {
+                hideAdminLoader();
                 alert('Please enter a valid 5-character code');
                 return;
             }
             
             if (parseFloat(minAmt) >= parseFloat(maxAmt)) {
+                hideAdminLoader();
                 alert('Max amount must be greater than min amount');
                 return;
             }
@@ -2226,6 +2511,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     alert('Gift code created: ' + data.code);
                     location.reload();
@@ -2234,12 +2520,14 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error creating gift code');
                 console.error(err);
             });
         }
         
         function toggleGift(code) {
+            showAdminLoader('Toggling gift code...');
             fetch('/admin/toggle_gift', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2247,6 +2535,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -2254,6 +2543,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error toggling gift code');
                 console.error(err);
             });
@@ -2262,6 +2552,8 @@ ADMIN_TEMPLATE = """
         function deleteGift(code) {
             if (!confirm('Delete this gift code?')) return;
             
+            showAdminLoader('Deleting gift code...');
+            
             fetch('/admin/toggle_gift', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2269,6 +2561,7 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
+                hideAdminLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
@@ -2276,6 +2569,7 @@ ADMIN_TEMPLATE = """
                 }
             })
             .catch(err => {
+                hideAdminLoader();
                 alert('Error deleting gift code');
                 console.error(err);
             });
@@ -2287,8 +2581,6 @@ ADMIN_TEMPLATE = """
 </body>
 </html>
 """
-
-
 
 # ==================== 10. START APP ====================
 if __name__ == '__main__':
