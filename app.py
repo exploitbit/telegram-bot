@@ -17,7 +17,7 @@ from werkzeug.utils import secure_filename
 # Get from Railway Environment Variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8295150408:AAF1P_IcRG-z8L54PNzZVFKNXts0Uwy0TtY')
 ADMIN_ID = os.environ.get('ADMIN_ID', '8435248854')
-BASE_URL = os.environ.get('BASE_URL', 'https://flask-production-04ac.up.railway.app')
+BASE_URL = os.environ.get('BASE_URL', 'https://web-production-7f83a.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
 
 # Directory Paths
