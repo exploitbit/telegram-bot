@@ -18,7 +18,7 @@ from werkzeug.utils import secure_filename
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8295150408:AAF1P_IcRG-z8L54PNzZVFKNXts0Uwy0TtY')
 ADMIN_ID = os.environ.get('ADMIN_ID', '8435248854')
 BASE_URL = os.environ.get('BASE_URL', 'https://telegram-bot.up.railway.app')
-PORT = int(os.environ.get('PORT', 5000))
+PORT = int(os.environ.get('PORT', 8080))
 
 # Directory Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1332,5 +1332,5 @@ if __name__ == '__main__':
     init_default_files()
     
     # Railway provides PORT environment variable
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
