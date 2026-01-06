@@ -14,7 +14,6 @@ import re
 from werkzeug.utils import secure_filename
 
 # ==================== 1. RAILWAY CONFIGURATION ====================
-# Get from Railway Environment Variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8295150408:AAF1P_IcRG-z8L54PNzZVFKNXts0Uwy0TtY')
 ADMIN_ID = os.environ.get('ADMIN_ID', '8435248854')
 BASE_URL = os.environ.get('BASE_URL', 'https://flask-production-04ac.up.railway.app')
@@ -33,7 +32,7 @@ WITHDRAWALS_FILE = os.path.join(DATA_DIR, "withdrawals.json")
 GIFTS_FILE = os.path.join(DATA_DIR, "gifts.json")
 LEADERBOARD_FILE = os.path.join(DATA_DIR, "leaderboard.json")
 
-# Logging for Railway
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -81,7 +80,6 @@ def init_default_files():
                 json.dump(default_data, f, indent=4)
             logger.info(f"Created default file: {filepath}")
 
-# Run initialization
 init_default_files()
 
 # ==================== 2. DATA MANAGEMENT ====================
@@ -155,7 +153,6 @@ def update_leaderboard():
     try:
         users = load_json(USERS_FILE, {})
         leaderboard = []
-        
         for uid, user_data in users.items():
             leaderboard.append({
                 "user_id": uid,
@@ -163,10 +160,8 @@ def update_leaderboard():
                 "balance": float(user_data.get("balance", 0)),
                 "total_refers": len(user_data.get("referred_users", []))
             })
-        
         leaderboard.sort(key=lambda x: x["balance"], reverse=True)
         leaderboard = leaderboard[:20]
-        
         data = {"last_updated": datetime.now().isoformat(), "data": leaderboard}
         save_json(LEADERBOARD_FILE, data)
         return data
@@ -178,7 +173,6 @@ def check_gift_code_expiry():
     gifts = load_json(GIFTS_FILE, [])
     updated = False
     current_time = datetime.now()
-    
     for gift in gifts[:]:
         if "expiry" in gift:
             try:
@@ -188,12 +182,11 @@ def check_gift_code_expiry():
                     updated = True
             except:
                 pass
-    
     if updated:
         save_json(GIFTS_FILE, gifts)
     return gifts
 
-# Custom Jinja2 filter for datetime parsing
+# Custom Jinja2 filter
 def datetime_from_isoformat(value):
     try:
         return datetime.fromisoformat(value)
@@ -202,11 +195,44 @@ def datetime_from_isoformat(value):
 
 app.jinja_env.filters['fromisoformat'] = datetime_from_isoformat
 
-# ==================== 4. BOT HANDLERS ====================
+# ==================== 4. PRIVATE CHANNEL HANDLER ====================
+def handle_private_channel(channel_id, user_id, channel_name):
+    """Handle private channel join requests"""
+    try:
+        # Check if user is already a member
+        member = bot.get_chat_member(channel_id, user_id)
+        if member.status in ['member', 'administrator', 'creator', 'restricted']:
+            return True, "Already a member"
+        
+        # Check if bot is admin in the channel
+        bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
+        if bot_member.status not in ['administrator', 'creator']:
+            return False, f"Bot is not admin in {channel_name}"
+        
+        # Try to approve join request if exists
+        try:
+            bot.approve_chat_join_request(channel_id, user_id)
+            return True, f"Join request approved for {channel_name}"
+        except Exception as e:
+            if "CHAT_JOIN_REQUEST_NOT_FOUND" in str(e):
+                # Send join request
+                try:
+                    chat_invite_link = bot.create_chat_invite_link(channel_id, creates_join_request=True)
+                    return False, f"Join request sent to {channel_name}. Please wait for admin approval."
+                except Exception as e2:
+                    return False, f"Could not send join request to {channel_name}"
+            return False, f"Error approving join request for {channel_name}"
+    except Exception as e:
+        logger.error(f"Private channel error: {e}")
+        return False, f"Error checking {channel_name}"
+
+# ==================== 5. BOT HANDLERS ====================
 @bot.chat_join_request_handler()
 def auto_approve(message):
+    """Auto approve join requests for channels where bot is admin"""
     try:
         bot.approve_chat_join_request(message.chat.id, message.from_user.id)
+        logger.info(f"Auto-approved join request for user {message.from_user.id} in channel {message.chat.id}")
     except Exception as e:
         logger.error(f"Auto approve error: {e}")
 
@@ -245,10 +271,6 @@ def handle_start(message):
                 "referred_users": [],
                 "claimed_gifts": []
             }
-            
-            # NOTE: Referral bonus will ONLY be given when the referred user verifies
-            # We don't give bonus at registration anymore
-            
             save_json(USERS_FILE, users)
             
             msg = f"🔔 *New User*\nName: {full_name}\nID: `{uid}`"
@@ -281,7 +303,7 @@ def handle_start(message):
     except Exception as e:
         logger.error(f"Start handler error: {e}")
 
-# ==================== 5. WEBAPP ROUTES ====================
+# ==================== 6. WEBAPP ROUTES ====================
 @app.route('/')
 def home():
     return "Telegram Bot is running! Use /start in Telegram."
@@ -297,7 +319,6 @@ def mini_app():
         settings = get_settings()
         user = users.get(str(uid), {"name": "Guest", "balance": 0.0, "verified": False})
         
-        # Get initial data for fast loading
         leaderboard_data = load_json(LEADERBOARD_FILE, {"last_updated": "2000-01-01", "data": []})
         
         return render_template_string(MINI_APP_TEMPLATE, 
@@ -312,20 +333,6 @@ def mini_app():
     except Exception as e:
         logger.error(f"Mini app error: {e}")
         return "Internal Server Error", 500
-
-@app.route('/get_pfp')
-def get_pfp():
-    uid = request.args.get('uid')
-    try:
-        photos = bot.get_user_profile_photos(uid)
-        if photos.total_count > 0:
-            file_id = photos.photos[0][0].file_id
-            file_info = bot.get_file(file_id)
-            dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-            return Response(requests.get(dl_url).content, mimetype='image/jpeg')
-    except Exception as e:
-        logger.error(f"PFP error: {e}")
-    return "No Image", 404
 
 @app.route('/api/verify', methods=['POST'])
 def api_verify():
@@ -344,41 +351,89 @@ def api_verify():
         if uid not in users:
             return jsonify({'ok': False, 'msg': 'User not found'})
         
-        # Check if already verified
         if users[uid].get('verified'):
             return jsonify({'ok': True, 'msg': 'Already verified', 'verified': True, 'balance': users[uid].get('balance', 0)})
         
-        # Check channel membership
+        verification_steps = []
         channel_errors = []
-        if settings['channels']:
-            for ch in settings['channels']:
-                try:
-                    if ch.get('id'):
-                        status = bot.get_chat_member(ch['id'], uid).status
-                        if status not in ['member', 'administrator', 'creator', 'restricted']:
-                            channel_errors.append(ch.get('btn_name', 'Channel'))
-                except Exception as e:
-                    logger.error(f"Channel check error: {e}")
-                    channel_errors.append(ch.get('btn_name', 'Channel'))
+        private_channels_info = []
         
-        # Device check
-        device_error = None
+        # Step 1: Check device verification (if enabled)
         if not settings.get('ignore_device_check', False) and fp and fp != 'skip':
+            verification_steps.append({"step": "device", "status": "checking", "message": "Checking device..."})
+            device_error = None
             for u_id, u_data in users.items():
                 if u_id == uid: 
                     continue
                 if u_data.get('verified') and str(u_data.get('device_id', '')) == fp:
-                    device_error = '⚠️ Device already used by another account!'
+                    device_error = 'Device already used by another account!'
                     break
+            
+            if device_error:
+                verification_steps.append({"step": "device", "status": "failed", "message": device_error})
+                return jsonify({
+                    'ok': False, 
+                    'msg': device_error, 
+                    'type': 'device',
+                    'steps': verification_steps
+                })
+            else:
+                verification_steps.append({"step": "device", "status": "passed", "message": "Device verified ✓"})
+        
+        # Step 2: Check all channels
+        if settings['channels']:
+            for idx, ch in enumerate(settings['channels']):
+                channel_name = ch.get('btn_name', f'Channel {idx+1}')
+                verification_steps.append({"step": f"channel_{idx}", "status": "checking", "message": f"Checking {channel_name}..."})
+                
+                try:
+                    if ch.get('id'):
+                        # Try to get member status
+                        member = bot.get_chat_member(ch['id'], uid)
+                        if member.status in ['member', 'administrator', 'creator', 'restricted']:
+                            verification_steps.append({"step": f"channel_{idx}", "status": "passed", "message": f"{channel_name}: Already member ✓"})
+                        else:
+                            # Check if channel is private (bot is admin)
+                            try:
+                                bot_member = bot.get_chat_member(ch['id'], bot.get_me().id)
+                                if bot_member.status in ['administrator', 'creator']:
+                                    # Try to approve join request
+                                    try:
+                                        bot.approve_chat_join_request(ch['id'], uid)
+                                        verification_steps.append({"step": f"channel_{idx}", "status": "passed", "message": f"{channel_name}: Request approved ✓"})
+                                        time.sleep(1)  # Small delay for Telegram API
+                                    except Exception as e:
+                                        if "CHAT_JOIN_REQUEST_NOT_FOUND" in str(e):
+                                            verification_steps.append({"step": f"channel_{idx}", "status": "pending", "message": f"{channel_name}: Request sent ✓"})
+                                            private_channels_info.append({
+                                                'name': channel_name,
+                                                'link': ch.get('link', '#'),
+                                                'status': 'pending'
+                                            })
+                                        else:
+                                            channel_errors.append(channel_name)
+                                            verification_steps.append({"step": f"channel_{idx}", "status": "failed", "message": f"{channel_name}: Error processing"})
+                                else:
+                                    channel_errors.append(channel_name)
+                                    verification_steps.append({"step": f"channel_{idx}", "status": "failed", "message": f"{channel_name}: Please join"})
+                            except Exception as e:
+                                channel_errors.append(channel_name)
+                                verification_steps.append({"step": f"channel_{idx}", "status": "failed", "message": f"{channel_name}: Cannot access"})
+                except Exception as e:
+                    channel_errors.append(channel_name)
+                    verification_steps.append({"step": f"channel_{idx}", "status": "failed", "message": f"{channel_name}: Error checking"})
         
         # Return specific errors
-        if channel_errors and device_error:
-            return jsonify({'ok': False, 'msg': f"Join channels: {', '.join(channel_errors)} & Device issue: {device_error}", 'type': 'both'})
-        elif channel_errors:
-            return jsonify({'ok': False, 'msg': f"Please join: {', '.join(channel_errors)}", 'type': 'channels'})
-        elif device_error:
-            return jsonify({'ok': False, 'msg': device_error, 'type': 'device'})
+        if channel_errors:
+            return jsonify({
+                'ok': False, 
+                'msg': f"Please join: {', '.join(channel_errors)}", 
+                'type': 'channels',
+                'steps': verification_steps,
+                'private_channels': private_channels_info
+            })
         
+        # All checks passed - give bonus
         try: 
             bonus = float(settings.get('welcome_bonus', 50))
         except: 
@@ -435,7 +490,16 @@ def api_verify():
             "date": datetime.now().strftime("%Y-%m-%d %H:%M")
         })
         save_json(WITHDRAWALS_FILE, w_list)
-        return jsonify({'ok': True, 'bonus': bonus, 'balance': users[uid]['balance'], 'verified': True})
+        
+        verification_steps.append({"step": "bonus", "status": "passed", "message": f"₹{bonus} bonus added ✓"})
+        
+        return jsonify({
+            'ok': True, 
+            'bonus': bonus, 
+            'balance': users[uid]['balance'], 
+            'verified': True,
+            'steps': verification_steps
+        })
     
     except Exception as e:
         logger.error(f"Verify error: {e}")
@@ -567,7 +631,7 @@ def api_history():
             return jsonify([])
         
         history = [w for w in load_json(WITHDRAWALS_FILE, []) if w.get('user_id') == uid]
-        return jsonify(history[::-1][:10])  # Limit to 10 items for faster loading
+        return jsonify(history[::-1][:10])
     except Exception as e:
         logger.error(f"History error: {e}")
         return jsonify([])
@@ -709,7 +773,7 @@ def api_get_refer_info():
         total_pending = 0
         total_verified = 0
         
-        for ref_uid in referred_users[:20]:  # Limit to 20 for faster loading
+        for ref_uid in referred_users[:20]:
             if ref_uid in users:
                 is_verified = users[ref_uid].get('verified', False)
                 status = "✅ VERIFIED" if is_verified else "⏳ PENDING"
@@ -747,7 +811,7 @@ def api_leaderboard():
         logger.error(f"Leaderboard error: {e}")
         return jsonify({"last_updated": datetime.now().isoformat(), "data": []})
 
-# ==================== 6. ADMIN PANEL ====================
+# ==================== 7. ADMIN PANEL ====================
 @app.route('/admin_panel')
 def admin_panel():
     try:
@@ -775,7 +839,6 @@ def admin_panel():
                     gift['remaining_minutes'] = 0
         
         users = load_json(USERS_FILE, {})
-        # Prepare user data for the table
         user_list = []
         for user_id, user_data in users.items():
             user_list.append({
@@ -804,7 +867,7 @@ def admin_panel():
         logger.error(f"Admin panel error: {e}")
         return f"Internal Server Error: {str(e)}", 500
 
-# ==================== 7. SETUP ====================
+# ==================== 8. SETUP ====================
 @app.route('/static/<path:filename>')
 def serve_static(filename): 
     return send_from_directory(STATIC_DIR, filename)
@@ -923,6 +986,14 @@ MINI_APP_TEMPLATE = """
         .loading-text { color: var(--cyan); font-size: 18px; font-weight: bold; margin-top: 20px; }
         .resource-bar { width: 80%; max-width: 300px; margin-top: 20px; }
         .resource-text { color: #888; font-size: 12px; margin-top: 5px; }
+        .verification-steps { background: rgba(255,255,255,0.05); border-radius: 10px; padding: 15px; margin-top: 15px; max-height: 200px; overflow-y: auto; }
+        .step-item { display: flex; align-items: center; gap: 10px; margin: 5px 0; padding: 8px; border-radius: 5px; background: rgba(255,255,255,0.03); }
+        .step-checking { color: #ffaa00; }
+        .step-passed { color: #00ff00; }
+        .step-failed { color: #ff4444; }
+        .step-pending { color: #0088ff; }
+        .step-icon { font-size: 14px; width: 20px; text-align: center; }
+        .private-channel-info { background: rgba(0,136,255,0.1); border: 1px solid #0088ff; border-radius: 8px; padding: 10px; margin: 10px 0; }
     </style>
 </head>
 <body>
@@ -933,8 +1004,15 @@ MINI_APP_TEMPLATE = """
             <div class="progress-bar">
                 <div id="resource-progress" class="progress-fill"></div>
             </div>
-            <div id="resource-text" class="resource-text">Loading resources...</div>
+            <div id="resource-text" class="resource-text">Initializing system...</div>
         </div>
+    </div>
+    
+    <div id="verification-process" class="action-loading" style="display: none;">
+        <div class="spinner"></div>
+        <div id="verification-text" class="action-loader">Starting verification...</div>
+        <div id="verification-steps" class="verification-steps" style="width: 80%; max-width: 300px; margin-top: 20px;"></div>
+        <div id="private-channels-info" style="width: 80%; max-width: 300px; margin-top: 10px;"></div>
     </div>
     
     <div id="action-loading" class="action-loading">
@@ -1087,8 +1165,10 @@ MINI_APP_TEMPLATE = """
         <div class="popup-content">
             <h3>⚠️ Verification Required</h3>
             <p id="verify-error-msg" style="color:#ff9900; margin:15px 0;">Please complete verification to continue</p>
+            <div id="private-channels-list" style="margin: 15px 0;"></div>
             <div class="verify-actions">
                 <button class="btn" onclick="closePop()" style="background:#f44; color:white;">CLOSE</button>
+                <button class="btn" onclick="retryVerification()" style="background:#0088ff; color:white;">RETRY</button>
             </div>
         </div>
     </div>
@@ -1101,7 +1181,6 @@ MINI_APP_TEMPLATE = """
         
         // Fast loading - show loading screen first, then app
         window.onload = function() {
-            // Simulate resource loading
             simulateResourceLoading();
         };
         
@@ -1110,19 +1189,27 @@ MINI_APP_TEMPLATE = """
             const progressBar = document.getElementById('resource-progress');
             const resourceText = document.getElementById('resource-text');
             
+            const steps = [
+                "Loading core modules...",
+                "Fetching user data...",
+                "Initializing interface...",
+                "Preparing verification system...",
+                "Ready!"
+            ];
+            
+            let stepIndex = 0;
+            
             const interval = setInterval(() => {
-                progress += 10;
+                progress += 20;
                 progressBar.style.width = progress + '%';
                 
-                if (progress <= 30) {
-                    resourceText.textContent = 'Loading core modules...';
-                } else if (progress <= 60) {
-                    resourceText.textContent = 'Fetching user data...';
-                } else if (progress <= 90) {
-                    resourceText.textContent = 'Initializing interface...';
-                } else {
-                    resourceText.textContent = 'Ready!';
-                }
+                if (progress <= 20) stepIndex = 0;
+                else if (progress <= 40) stepIndex = 1;
+                else if (progress <= 60) stepIndex = 2;
+                else if (progress <= 80) stepIndex = 3;
+                else stepIndex = 4;
+                
+                resourceText.textContent = steps[stepIndex];
                 
                 if (progress >= 100) {
                     clearInterval(interval);
@@ -1137,97 +1224,172 @@ MINI_APP_TEMPLATE = """
                         }, 300);
                     }, 500);
                 }
-            }, 100);
+            }, 200);
         }
         
         function loadCriticalData() {
-            // Load history
             loadHistory();
-            
-            // Load refer info
             loadReferInfo();
             
-            // If not verified, show unlock overlay (already shown from template)
             if (!isVerified) {
-                // We already show the glass overlay from template
                 console.log('User not verified, showing unlock overlay');
             } else {
-                // User is already verified, enable withdrawal button
                 document.querySelector('#balance-card .btn').disabled = false;
                 document.querySelector('#balance-card .btn').style.opacity = '1';
             }
         }
         
         function startVerification() {
-            showActionLoader('Checking verification...');
+            document.getElementById('verification-process').style.display = 'flex';
+            document.getElementById('verification-steps').innerHTML = '';
+            document.getElementById('private-channels-info').innerHTML = '';
             
-            // Generate a simple fingerprint (for demo)
+            updateVerificationStep('Starting verification process...', 'checking');
+            
+            // Generate a simple fingerprint
             const fingerprint = 'user-' + UID + '-' + Date.now();
             
-            fetch('/api/verify', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({user_id: UID, fp: fingerprint, bot_type: 'main'})
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideActionLoader();
-                
-                if (data.ok) {
-                    // Success - user verified
-                    isVerified = true;
-                    
-                    // Hide glass overlay
-                    document.getElementById('glass-overlay').classList.add('hidden');
-                    
-                    // Enable withdrawal button
-                    const withdrawBtn = document.querySelector('#balance-card .btn');
-                    withdrawBtn.disabled = false;
-                    withdrawBtn.style.opacity = '1';
-                    
-                    // Update balance
-                    if (data.balance !== undefined) {
-                        document.getElementById('balance-amount').textContent = '₹' + data.balance.toFixed(2);
+            setTimeout(() => {
+                fetch('/api/verify', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({user_id: UID, fp: fingerprint, bot_type: 'main'})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        // Success - user verified
+                        isVerified = true;
+                        
+                        // Update steps visualization
+                        if (data.steps) {
+                            data.steps.forEach(step => {
+                                updateVerificationStep(step.message, step.status);
+                            });
+                        }
+                        
+                        // Hide verification process
+                        setTimeout(() => {
+                            document.getElementById('verification-process').style.display = 'none';
+                            
+                            // Hide glass overlay
+                            document.getElementById('glass-overlay').classList.add('hidden');
+                            
+                            // Enable withdrawal button
+                            const withdrawBtn = document.querySelector('#balance-card .btn');
+                            withdrawBtn.disabled = false;
+                            withdrawBtn.style.opacity = '1';
+                            
+                            // Update balance
+                            if (data.balance !== undefined) {
+                                document.getElementById('balance-amount').textContent = '₹' + data.balance.toFixed(2);
+                            }
+                            
+                            // Show success message
+                            showToast(`✅ Verification successful! ₹${data.bonus || 50} bonus added!`, 'success', 5000);
+                            
+                            // Load updated data
+                            loadHistory();
+                            loadReferInfo();
+                            
+                            // Show confetti
+                            if (typeof confetti === 'function') {
+                                confetti({particleCount: 150, spread: 70});
+                            }
+                        }, 1000);
+                    } else {
+                        // Verification failed
+                        setTimeout(() => {
+                            document.getElementById('verification-process').style.display = 'none';
+                            showVerificationError(data.msg, data.type, data.private_channels, data.steps);
+                        }, 1000);
                     }
-                    
-                    // Show success message
-                    showToast(`✅ Verification successful! ₹${data.bonus || 50} bonus added!`, 'success', 5000);
-                    
-                    // Load updated history
-                    loadHistory();
-                    
-                    // Load updated refer info
-                    loadReferInfo();
-                    
-                    // Show confetti
-                    if (typeof confetti === 'function') {
-                        confetti({particleCount: 150, spread: 70});
-                    }
-                } else {
-                    // Verification failed
-                    showVerificationError(data.msg, data.type || 'general');
-                }
-            })
-            .catch(err => {
-                hideActionLoader();
-                showToast('Verification failed. Please try again.', 'error');
-                console.error('Verification error:', err);
-            });
+                })
+                .catch(err => {
+                    document.getElementById('verification-process').style.display = 'none';
+                    showToast('Verification failed. Please try again.', 'error');
+                    console.error('Verification error:', err);
+                });
+            }, 500);
         }
         
-        function showVerificationError(message, errorType) {
+        function updateVerificationStep(message, status) {
+            const stepsContainer = document.getElementById('verification-steps');
+            const stepClass = 'step-' + status;
+            const icon = getStatusIcon(status);
+            
+            const stepDiv = document.createElement('div');
+            stepDiv.className = 'step-item';
+            stepDiv.innerHTML = `
+                <div class="step-icon ${stepClass}">${icon}</div>
+                <div class="${stepClass}" style="flex: 1;">${message}</div>
+            `;
+            
+            stepsContainer.appendChild(stepDiv);
+            stepsContainer.scrollTop = stepsContainer.scrollHeight;
+            
+            // Update verification text
+            document.getElementById('verification-text').textContent = getVerificationStatusText(status);
+        }
+        
+        function getStatusIcon(status) {
+            switch(status) {
+                case 'checking': return '⏳';
+                case 'passed': return '✓';
+                case 'failed': return '✗';
+                case 'pending': return '⏱️';
+                default: return '○';
+            }
+        }
+        
+        function getVerificationStatusText(status) {
+            switch(status) {
+                case 'checking': return 'Checking verification...';
+                case 'passed': return 'Verification passed!';
+                case 'failed': return 'Verification failed';
+                case 'pending': return 'Waiting for approval...';
+                default: return 'Processing...';
+            }
+        }
+        
+        function showVerificationError(message, errorType, privateChannels, steps) {
             let errorMsg = message;
             
-            if (errorType === 'channels') {
-                errorMsg = '❌ Please join required channels first!';
-            } else if (errorType === 'device') {
-                errorMsg = '❌ Device verification failed!';
-            } else if (errorType === 'both') {
-                errorMsg = '❌ Please join channels and use a different device!';
+            // Show steps if available
+            if (steps) {
+                const stepsContainer = document.getElementById('verification-steps');
+                stepsContainer.innerHTML = '';
+                steps.forEach(step => {
+                    updateVerificationStep(step.message, step.status);
+                });
             }
             
+            // Update error message in popup
             document.getElementById('verify-error-msg').textContent = errorMsg;
+            
+            // Show private channel info if available
+            const privateChannelsList = document.getElementById('private-channels-list');
+            privateChannelsList.innerHTML = '';
+            
+            if (privateChannels && privateChannels.length > 0) {
+                let privateChannelsHtml = '<div class="private-channel-info">';
+                privateChannelsHtml += '<div style="font-weight:bold; color:#0088ff; margin-bottom:5px;">Private Channels:</div>';
+                privateChannels.forEach(channel => {
+                    privateChannelsHtml += `<div style="margin:5px 0;">
+                        <div>${channel.name}</div>
+                        <div style="font-size:12px; color:#aaa;">Status: ${channel.status === 'pending' ? 'Join request sent - waiting for admin approval' : 'Approved'}</div>
+                    </div>`;
+                });
+                privateChannelsHtml += '</div>';
+                privateChannelsList.innerHTML = privateChannelsHtml;
+            }
+            
             document.getElementById('pop-verify').style.display = 'flex';
+        }
+        
+        function retryVerification() {
+            document.getElementById('pop-verify').style.display = 'none';
+            startVerification();
         }
         
         function showActionLoader(text = 'Processing...') {
@@ -1259,25 +1421,18 @@ MINI_APP_TEMPLATE = """
                         document.getElementById('balance-amount').textContent = '₹' + data.balance.toFixed(2);
                     }
                 })
-                .catch(() => {
-                    // Keep current balance on error
-                });
+                .catch(() => {});
         }
         
         function switchTab(tabName) {
             if (!resourcesLoaded) return;
             
-            // Update active nav button
             document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
             event.target.closest('.nav-btn').classList.add('active');
             
-            // Hide all tabs
             document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
-            
-            // Show selected tab
             document.getElementById('tab-' + tabName).classList.remove('hidden');
             
-            // Load data for specific tabs
             if (tabName === 'leaderboard') {
                 loadLeaderboard();
             } else if (tabName === 'refer') {
@@ -1300,7 +1455,6 @@ MINI_APP_TEMPLATE = """
             }
             
             closePop();
-            
             showActionLoader('Processing withdrawal...');
             
             fetch('/api/withdraw', {
@@ -1311,19 +1465,13 @@ MINI_APP_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 hideActionLoader();
-                
                 if (data.ok) {
                     showToast(data.msg, 'success', 5000);
-                    if (data.auto) {
-                        if (typeof confetti === 'function') {
-                            confetti({particleCount: 150, spread: 80});
-                        }
+                    if (data.auto && typeof confetti === 'function') {
+                        confetti({particleCount: 150, spread: 80});
                     }
-                    // Update balance with new value from server
                     if (data.new_balance !== undefined) {
                         document.getElementById('balance-amount').textContent = '₹' + data.new_balance.toFixed(2);
-                    } else {
-                        updateBalance();
                     }
                     loadHistory();
                 } else {
@@ -1333,7 +1481,6 @@ MINI_APP_TEMPLATE = """
             .catch(err => {
                 hideActionLoader();
                 showToast('Withdrawal failed. Please try again.', 'error');
-                console.error('Withdraw error:', err);
             });
         }
         
@@ -1374,7 +1521,6 @@ MINI_APP_TEMPLATE = """
             .catch(err => {
                 hideActionLoader();
                 showToast('Failed to send message', 'error');
-                console.error('Contact error:', err);
             });
         }
         
@@ -1404,7 +1550,6 @@ MINI_APP_TEMPLATE = """
                 `).join('');
             })
             .catch(err => {
-                console.error('History error:', err);
                 const container = document.getElementById('history-list');
                 container.innerHTML = '<div style="text-align:center; color:#555; padding:20px;">Failed to load history</div>';
             });
@@ -1435,7 +1580,6 @@ MINI_APP_TEMPLATE = """
                 }
             })
             .catch(err => {
-                console.error('Refer info error:', err);
                 document.getElementById('refer-code-display').textContent = 'ERROR';
             });
         }
@@ -1444,9 +1588,7 @@ MINI_APP_TEMPLATE = """
             if (!referData) return;
             
             navigator.clipboard.writeText(referData.refer_code)
-                .then(() => {
-                    showToast('Refer code copied!', 'success', 2000);
-                })
+                .then(() => showToast('Refer code copied!', 'success', 2000))
                 .catch(() => showToast('Failed to copy', 'error'));
         }
         
@@ -1476,31 +1618,22 @@ MINI_APP_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 hideActionLoader();
-                
                 const resultDiv = document.getElementById('gift-result');
                 if (data.ok) {
                     resultDiv.innerHTML = `<div style="color:#0f0; font-weight:bold; font-size:18px;">${data.msg}</div>`;
                     document.getElementById('gift-code').value = '';
-                    
                     showToast(data.msg, 'success', 5000);
-                    
                     if (typeof confetti === 'function') {
                         confetti({particleCount: 200, spread: 90});
                     }
-                    
-                    // Update balance with new value from server
                     if (data.new_balance !== undefined) {
                         document.getElementById('balance-amount').textContent = '₹' + data.new_balance.toFixed(2);
-                    } else {
-                        updateBalance();
                     }
                     loadHistory();
                 } else {
                     resultDiv.innerHTML = `<div style="color:#f44; font-weight:bold;">${data.msg}</div>`;
                     showToast(data.msg, 'error');
                 }
-                
-                // Clear result after 5 seconds
                 setTimeout(() => {
                     resultDiv.innerHTML = '';
                 }, 5000);
@@ -1508,7 +1641,6 @@ MINI_APP_TEMPLATE = """
             .catch(err => {
                 hideActionLoader();
                 showToast('Failed to claim gift code', 'error');
-                console.error('Claim error:', err);
             });
         }
         
@@ -1534,9 +1666,7 @@ MINI_APP_TEMPLATE = """
                     </tr>
                 `).join('');
             })
-            .catch(err => {
-                console.error('Leaderboard error:', err);
-            });
+            .catch(err => {});
         }
         
         function openPop(id) {
@@ -1553,11 +1683,8 @@ MINI_APP_TEMPLATE = """
 </html>
 """
 
-# ==================== 9. START APP ====================
+# ==================== 10. START APP ====================
 if __name__ == '__main__':
-    # Initialize default files
     init_default_files()
-    
-    # Railway provides PORT environment variable
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
