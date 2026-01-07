@@ -18,7 +18,7 @@ import hashlib
 import threading
 
 # ==================== 1. RAILWAY CONFIGURATION ====================
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8295150408:AAF1P_IcRG-z8L54PNzZVFKNXts0Uwy0TtY')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8570959299:AAGRlRzgamjNUopjE5Dzk5e7vJm6M6D7rEA)
 ADMIN_ID = os.environ.get('ADMIN_ID', '8435248854')
 BASE_URL = os.environ.get('BASE_URL', 'https://flask-production-04ac.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
