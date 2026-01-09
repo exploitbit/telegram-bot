@@ -392,7 +392,7 @@ def handle_start(message):
             clean_display_name = settings.get('app_name', 'USER')
         
         clean_display_name = urllib.parse.quote(clean_display_name)
-        img_url = f"https://res.cloudinary.com/dneusgyzc/image/upload/l_text:Stalinist%20One_130_bold_center:{clean_display_name},co_white,g_center/v1767253426/botpy_fdkyke.jpg"
+        img_url = f"https://res.cloudinary.com/dneusgyzc/image/upload/v1767971399/IMG_20260109_203909_698_wr66ik.jpg"
         
         markup = InlineKeyboardMarkup(row_width=1)
         for ch in settings['channels']:
