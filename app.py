@@ -1,4 +1,4 @@
-# app.py - Complete Enhanced Telegram Bot with UPI Integration
+# app.py - Complete Fixed Telegram Bot with UPI Integration
 import os
 import sys
 import json
@@ -28,7 +28,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 # ==================== CONFIGURATION ====================
 # Environment variables with defaults
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8280352331:AAGwEGmIKlPnFWBeFihp9mLxbgtM_qBpATc')
-ADMIN_IDS = [8469993808, 84897557755]  # Multiple admin IDs
+ADMIN_IDS = [8469993808]  # Fixed admin ID
 BASE_URL = os.environ.get('BASE_URL', 'web-production-3dfc9.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -516,7 +516,7 @@ def handle_start(message):
         
         # Add verify button (if not hidden)
         if not settings.get('hide_verify_button', False):
-            web_app_url = f"{BASE_URL}/mini_app?user_id={user_id}&t={int(time.time())}"
+            web_app_url = f"https://{BASE_URL}/mini_app?user_id={user_id}&t={int(time.time())}"
             markup.add(InlineKeyboardButton(
                 "🚀 OPEN EARNING APP", 
                 web_app=WebAppInfo(url=web_app_url)
@@ -526,7 +526,7 @@ def handle_start(message):
         if is_admin(user_id):
             markup.add(InlineKeyboardButton(
                 "⚙️ ADMIN PANEL", 
-                url=f"{BASE_URL}/admin_panel?user_id={user_id}&t={int(time.time())}"
+                url=f"https://{BASE_URL}/admin_panel?user_id={user_id}&t={int(time.time())}"
             ))
         
         welcome_text = f"""🎉 *WELCOME {display_name}!* 🎉
@@ -546,7 +546,7 @@ def handle_start(message):
 
         # Try to send with logo
         try:
-            logo_url = f"{BASE_URL}/static/{settings.get('logo_filename', 'logo_default.png')}"
+            logo_url = f"https://{BASE_URL}/static/{settings.get('logo_filename', 'logo_default.png')}"
             bot.send_photo(
                 message.chat.id,
                 logo_url,
@@ -562,17 +562,6 @@ def handle_start(message):
     except Exception as e:
         logger.error(f"Start handler error: {e}")
         safe_send_message(message.chat.id, "An error occurred. Please try again later.")
-
-@bot.chat_join_request_handler()
-def handle_join_request(message):
-    """Auto-approve join requests for private channels"""
-    try:
-        settings = Storage.get_settings()
-        if settings.get('auto_accept_private', False):
-            bot.approve_chat_join_request(message.chat.id, message.from_user.id)
-            logger.info(f"Auto-approved join request for user {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"Join request error: {e}")
 
 @bot.message_handler(commands=['balance'])
 def handle_balance(message):
@@ -615,7 +604,7 @@ def handle_refer(message):
             
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton("📋 Copy Referral Link", url=refer_link))
-            markup.add(InlineKeyboardButton("👥 My Referrals", web_app=WebAppInfo(url=f"{BASE_URL}/mini_app?user_id={user_id}&tab=refer")))
+            markup.add(InlineKeyboardButton("👥 My Referrals", web_app=WebAppInfo(url=f"https://{BASE_URL}/mini_app?user_id={user_id}&tab=refer")))
             
             safe_send_message(
                 message.chat.id,
@@ -631,6 +620,149 @@ def handle_refer(message):
     
     except Exception as e:
         logger.error(f"Refer command error: {e}")
+
+@bot.chat_join_request_handler()
+def handle_join_request(message):
+    """Auto-approve join requests for private channels"""
+    try:
+        settings = Storage.get_settings()
+        if settings.get('auto_accept_private', False):
+            bot.approve_chat_join_request(message.chat.id, message.from_user.id)
+            logger.info(f"Auto-approved join request for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Join request error: {e}")
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Handle callback queries from inline buttons"""
+    try:
+        data = call.data
+        
+        if data.startswith('approve_'):
+            tx_id = data.replace('approve_', '')
+            
+            # Ask for UTR
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("📝 Enter UTR", callback_data=f"utr_{tx_id}"))
+            markup.add(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel"))
+            
+            bot.edit_message_text(
+                f"Please enter UTR for transaction {tx_id}:",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup
+            )
+        
+        elif data.startswith('reject_'):
+            tx_id = data.replace('reject_', '')
+            
+            # Process rejection
+            result = admin_process_withdrawal_internal(tx_id, 'reject')
+            
+            if result['ok']:
+                bot.edit_message_text(
+                    f"✅ Transaction {tx_id} has been rejected and amount refunded.",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            else:
+                bot.edit_message_text(
+                    f"❌ Error: {result['msg']}",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+        
+        elif data.startswith('utr_'):
+            tx_id = data.replace('utr_', '')
+            
+            # Ask user to send UTR as message
+            bot.edit_message_text(
+                f"Please reply to this message with the UTR for {tx_id}:",
+                call.message.chat.id,
+                call.message.message_id
+            )
+        
+        elif data == 'cancel':
+            bot.edit_message_text(
+                "Action cancelled.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+    
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+
+# Helper function for internal withdrawal processing
+def admin_process_withdrawal_internal(tx_id, action, utr=''):
+    """Internal function to process withdrawal"""
+    try:
+        withdrawals = Storage.get_withdrawals()
+        target_withdrawal = None
+        
+        for w in withdrawals:
+            if w.get('tx_id') == tx_id:
+                target_withdrawal = w
+                break
+        
+        if not target_withdrawal:
+            return {'ok': False, 'msg': 'Withdrawal not found'}
+        
+        if action == 'approve':
+            # Update withdrawal status
+            target_withdrawal['status'] = 'completed'
+            target_withdrawal['utr'] = utr
+            target_withdrawal['completed_at'] = datetime.now().isoformat()
+            
+            # Update in database
+            Storage.update_withdrawal(tx_id, {
+                'status': 'completed',
+                'utr': utr,
+                'completed_at': datetime.now().isoformat()
+            })
+            
+            # Update user's total withdrawn
+            user = Storage.get_user(target_withdrawal['user_id'])
+            if user:
+                user['total_withdrawn'] = float(user.get('total_withdrawn', 0)) + float(target_withdrawal['amount'])
+                Storage.save_user(user)
+            
+            # Notify user
+            safe_send_message(
+                target_withdrawal['user_id'],
+                f"✅ *Withdrawal Approved!*\n\nAmount: ₹{target_withdrawal['amount']}\nUTR: `{utr}`\nTxID: `{tx_id}`"
+            )
+            
+            return {'ok': True}
+        
+        elif action == 'reject':
+            # Refund amount to user
+            user = Storage.get_user(target_withdrawal['user_id'])
+            if user:
+                user['balance'] = float(user.get('balance', 0)) + float(target_withdrawal['amount'])
+                Storage.save_user(user)
+            
+            # Update withdrawal status
+            target_withdrawal['status'] = 'rejected'
+            target_withdrawal['rejected_at'] = datetime.now().isoformat()
+            
+            Storage.update_withdrawal(tx_id, {
+                'status': 'rejected',
+                'rejected_at': datetime.now().isoformat()
+            })
+            
+            # Notify user
+            safe_send_message(
+                target_withdrawal['user_id'],
+                f"❌ *Withdrawal Rejected*\n\nAmount: ₹{target_withdrawal['amount']} has been refunded to your balance.\nTxID: `{tx_id}`"
+            )
+            
+            return {'ok': True}
+        
+        return {'ok': False, 'msg': 'Invalid action'}
+    
+    except Exception as e:
+        logger.error(f"Process withdrawal internal error: {e}")
+        return {'ok': False, 'msg': str(e)}
 
 # ==================== FLASK ROUTES ====================
 @app.route('/')
@@ -1732,142 +1864,6 @@ def admin_upload_logo():
         logger.error(f"Upload logo error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
-# ==================== CALLBACK QUERY HANDLERS ====================
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    """Handle callback queries from inline buttons"""
-    try:
-        data = call.data
-        
-        if data.startswith('approve_'):
-            tx_id = data.replace('approve_', '')
-            
-            # Ask for UTR
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("📝 Enter UTR", callback_data=f"utr_{tx_id}"))
-            markup.add(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel"))
-            
-            bot.edit_message_text(
-                f"Please enter UTR for transaction {tx_id}:",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=markup
-            )
-        
-        elif data.startswith('reject_'):
-            tx_id = data.replace('reject_', '')
-            
-            # Process rejection
-            result = admin_process_withdrawal_internal(tx_id, 'reject')
-            
-            if result['ok']:
-                bot.edit_message_text(
-                    f"✅ Transaction {tx_id} has been rejected and amount refunded.",
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-            else:
-                bot.edit_message_text(
-                    f"❌ Error: {result['msg']}",
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-        
-        elif data.startswith('utr_'):
-            tx_id = data.replace('utr_', '')
-            
-            # Ask user to send UTR as message
-            bot.edit_message_text(
-                f"Please reply to this message with the UTR for {tx_id}:",
-                call.message.chat.id,
-                call.message.message_id
-            )
-            
-            # Store context for next message
-            # This would need session storage in a real implementation
-        
-        elif data == 'cancel':
-            bot.edit_message_text(
-                "Action cancelled.",
-                call.message.chat.id,
-                call.message.message_id
-            )
-    
-    except Exception as e:
-        logger.error(f"Callback error: {e}")
-
-# Helper function for internal withdrawal processing
-def admin_process_withdrawal_internal(tx_id, action, utr=''):
-    """Internal function to process withdrawal"""
-    try:
-        withdrawals = Storage.get_withdrawals()
-        target_withdrawal = None
-        
-        for w in withdrawals:
-            if w.get('tx_id') == tx_id:
-                target_withdrawal = w
-                break
-        
-        if not target_withdrawal:
-            return {'ok': False, 'msg': 'Withdrawal not found'}
-        
-        if action == 'approve':
-            # Update withdrawal status
-            target_withdrawal['status'] = 'completed'
-            target_withdrawal['utr'] = utr
-            target_withdrawal['completed_at'] = datetime.now().isoformat()
-            
-            # Update in database
-            Storage.update_withdrawal(tx_id, {
-                'status': 'completed',
-                'utr': utr,
-                'completed_at': datetime.now().isoformat()
-            })
-            
-            # Update user's total withdrawn
-            user = Storage.get_user(target_withdrawal['user_id'])
-            if user:
-                user['total_withdrawn'] = float(user.get('total_withdrawn', 0)) + float(target_withdrawal['amount'])
-                Storage.save_user(user)
-            
-            # Notify user
-            safe_send_message(
-                target_withdrawal['user_id'],
-                f"✅ *Withdrawal Approved!*\n\nAmount: ₹{target_withdrawal['amount']}\nUTR: `{utr}`\nTxID: `{tx_id}`"
-            )
-            
-            return {'ok': True}
-        
-        elif action == 'reject':
-            # Refund amount to user
-            user = Storage.get_user(target_withdrawal['user_id'])
-            if user:
-                user['balance'] = float(user.get('balance', 0)) + float(target_withdrawal['amount'])
-                Storage.save_user(user)
-            
-            # Update withdrawal status
-            target_withdrawal['status'] = 'rejected'
-            target_withdrawal['rejected_at'] = datetime.now().isoformat()
-            
-            Storage.update_withdrawal(tx_id, {
-                'status': 'rejected',
-                'rejected_at': datetime.now().isoformat()
-            })
-            
-            # Notify user
-            safe_send_message(
-                target_withdrawal['user_id'],
-                f"❌ *Withdrawal Rejected*\n\nAmount: ₹{target_withdrawal['amount']} has been refunded to your balance.\nTxID: `{tx_id}`"
-            )
-            
-            return {'ok': True}
-        
-        return {'ok': False, 'msg': 'Invalid action'}
-    
-    except Exception as e:
-        logger.error(f"Process withdrawal internal error: {e}")
-        return {'ok': False, 'msg': str(e)}
-
 # ==================== STATIC FILES ====================
 @app.route('/static/<path:filename>')
 def serve_static(filename):
@@ -1902,7 +1898,7 @@ def get_pfp():
 def setup_webhook():
     """Setup telegram webhook"""
     try:
-        webhook_url = f"{BASE_URL}/webhook"
+        webhook_url = f"https://{BASE_URL}/webhook"
         bot.remove_webhook()
         time.sleep(1)
         bot.set_webhook(url=webhook_url)
@@ -1934,9 +1930,8 @@ def health():
         'bot': 'running'
     })
 
-
+# ==================== HTML TEMPLATES ====================
 MINI_APP_TEMPLATE = """
-<!-- MINI_APP_TEMPLATE - Complete Modern User Interface -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2077,6 +2072,7 @@ MINI_APP_TEMPLATE = """
             display: flex;
             align-items: center;
             gap: 5px;
+            cursor: pointer;
         }
 
         /* Balance Card */
@@ -2216,14 +2212,14 @@ MINI_APP_TEMPLATE = """
             box-shadow: 0 5px 20px rgba(255, 215, 0, 0.4);
         }
 
-        /* Navigation */
+        /* Navigation Bar - Fixed */
         .nav-bar {
             display: flex;
             background: white;
             padding: 10px;
             border-radius: 20px;
             margin-bottom: 20px;
-            gap: 10px;
+            gap: 5px;
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
         }
 
@@ -2233,11 +2229,13 @@ MINI_APP_TEMPLATE = """
             flex-direction: column;
             align-items: center;
             gap: 5px;
-            padding: 10px;
+            padding: 12px 5px;
             border-radius: 15px;
             cursor: pointer;
             transition: all 0.3s;
             color: #888;
+            background: transparent;
+            border: none;
         }
 
         .nav-item i {
@@ -2252,6 +2250,8 @@ MINI_APP_TEMPLATE = """
         .nav-item.active {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
         }
 
         /* Tabs */
@@ -2935,7 +2935,7 @@ MINI_APP_TEMPLATE = """
     <!-- Loading Screen -->
     <div id="loadingScreen" class="loading-screen">
         <div class="loading-content">
-            <img src="{{ base_url }}/static/{{ settings.logo_filename }}?v={{ timestamp }}" style="width: 100px; height: 100px; border-radius: 20px; margin-bottom: 20px;">
+            <img src="https://{{ base_url }}/static/{{ settings.logo_filename }}?v={{ timestamp }}" style="width: 100px; height: 100px; border-radius: 20px; margin-bottom: 20px;">
             <div class="loading-spinner"></div>
             <h3>{{ settings.bot_name }}</h3>
             <div class="loading-progress">
@@ -3029,13 +3029,10 @@ MINI_APP_TEMPLATE = """
     <div id="app" class="app-container" style="display: none;">
         <!-- Header -->
         <div class="header">
-            {% if user.photo %}
-            <img src="/get_pfp?uid={{ user_id }}" class="profile-pic">
-            {% else %}
-            <div class="profile-icon">
+            <img src="/get_pfp?uid={{ user_id }}" class="profile-pic" onerror="this.style.display='none'; document.querySelector('.profile-icon').style.display='flex';">
+            <div class="profile-icon" style="display: none;">
                 <i class="fas fa-user"></i>
             </div>
-            {% endif %}
             
             <div class="user-info">
                 <div class="user-name">{{ user.name }}</div>
@@ -3068,24 +3065,24 @@ MINI_APP_TEMPLATE = """
             </button>
         </div>
 
-        <!-- Navigation -->
+        <!-- Navigation Bar - Fixed -->
         <div class="nav-bar">
-            <div class="nav-item active" onclick="switchTab('home')">
+            <button class="nav-item active" onclick="switchTab('home', this)">
                 <i class="fas fa-home"></i>
                 <span>HOME</span>
-            </div>
-            <div class="nav-item" onclick="switchTab('gift')">
+            </button>
+            <button class="nav-item" onclick="switchTab('gift', this)">
                 <i class="fas fa-gift"></i>
                 <span>GIFT</span>
-            </div>
-            <div class="nav-item" onclick="switchTab('refer')">
+            </button>
+            <button class="nav-item" onclick="switchTab('refer', this)">
                 <i class="fas fa-users"></i>
                 <span>REFER</span>
-            </div>
-            <div class="nav-item" onclick="switchTab('rank')">
+            </button>
+            <button class="nav-item" onclick="switchTab('rank', this)">
                 <i class="fas fa-trophy"></i>
                 <span>RANK</span>
-            </div>
+            </button>
         </div>
 
         <!-- Home Tab -->
@@ -3317,14 +3314,25 @@ MINI_APP_TEMPLATE = """
             }
         }
         
-        // Tab switching
-        function switchTab(tabName) {
-            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+        // Tab switching - Fixed
+        function switchTab(tabName, element) {
+            // Remove active class from all nav items
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.classList.remove('active');
+            });
             
-            event.currentTarget.classList.add('active');
+            // Add active class to clicked item
+            element.classList.add('active');
+            
+            // Hide all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab
             document.getElementById('tab-' + tabName).classList.add('active');
             
+            // Load tab-specific data
             if (tabName === 'rank') {
                 loadLeaderboard();
             } else if (tabName === 'refer') {
@@ -5665,14 +5673,27 @@ if __name__ == '__main__':
     default_logo_path = os.path.join(STATIC_DIR, 'logo_default.png')
     if not os.path.exists(default_logo_path):
         # Create a simple default logo
-        from PIL import Image, ImageDraw
         try:
-            img = Image.new('RGB', (512, 512), color=(124, 58, 237))
+            from PIL import Image, ImageDraw
+            img = Image.new('RGB', (512, 512), color=(102, 126, 234))
             d = ImageDraw.Draw(img)
-            d.text((256, 256), "💰", fill=(255, 255, 255), anchor="mm")
+            d.text((256, 256), "💰", fill=(255, 255, 255), anchor="mm", font_size=200)
             img.save(default_logo_path)
         except:
-            pass
+            # If PIL not available, create a simple text file
+            with open(default_logo_path, 'wb') as f:
+                f.write(b'')
+    
+    # Set webhook on startup
+    with app.app_context():
+        try:
+            webhook_url = f"https://{BASE_URL}/webhook"
+            bot.remove_webhook()
+            time.sleep(1)
+            bot.set_webhook(url=webhook_url)
+            logger.info(f"✅ Webhook set to {webhook_url}")
+        except Exception as e:
+            logger.error(f"❌ Failed to set webhook: {e}")
     
     # Start Flask app
     port = int(os.environ.get("PORT", 8080))
