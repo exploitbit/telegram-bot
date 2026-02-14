@@ -19,7 +19,7 @@ import threading
 # ==================== 1. RAILWAY CONFIGURATION ====================
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8280352331:AAGwEGmIKlPnFWBeFihp9mLxbgtM_qBpATc')
 ADMIN_ID = os.environ.get('ADMIN_ID', '8469993808')
-BASE_URL = os.environ.get('BASE_URL', 'web-production-a7795b.up.railway.app')
+BASE_URL = os.environ.get('BASE_URL', 'web-production-3dfc9.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
 
 # Directory Paths
