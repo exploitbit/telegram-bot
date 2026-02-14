@@ -3668,7 +3668,7 @@ MINI_APP_TEMPLATE = """
         
         function shareReferLink() {
             const code = document.getElementById('referCode').textContent;
-            const botUsername = "{{ bot.get_me().username }}";
+            const botUsername = "auto_vfx_bot";
             const link = `https://t.me/${botUsername}?start=${code}`;
             const text = `Join and earn money! Use my referral code: ${code}`;
             
