@@ -2664,14 +2664,13 @@ async function showMainMenu(ctx, user) {
     
 
 const buttons = [
-    [Markup.button.webApp('🌐 Open Web App', `${WEB_APP_URL}/webapp?userId=${ctx.from.id}`)],
+    [Markup.button.webApp('🌐 Open Web App', `${WEB_APP_URL}/admin?userId=${ctx.from.id}`)],
     [
         Markup.button.callback('🏠 Home', 'web_home'),
         Markup.button.callback('👥 Refer', 'web_refer'),
         Markup.button.callback('📊 History', 'web_history')
     ],
-    [Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')],
-    [Markup.button.webApp('👑 Admin Panel', `${WEB_APP_URL}/admin?userId=${ctx.from.id}`)]
+    [Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')]
 ];
 
 const keyboard = Markup.inlineKeyboard(buttons);
