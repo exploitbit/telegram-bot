@@ -2663,7 +2663,7 @@ async function showMainMenu(ctx, user) {
     `;
     
     const keyboard = Markup.inlineKeyboard([
-        [Markup.button.webApp('🌐 Open Web App', WEB_APP_URL)],
+        [Markup.button.webApp('🌐 Open Web App', WEB_APP_URL + '?userId=' + ctx.from.id)],
         [
             Markup.button.callback('🏠 Home', 'web_home'),
             Markup.button.callback('👥 Refer', 'web_refer'),
