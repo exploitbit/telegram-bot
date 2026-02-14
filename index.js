@@ -16,7 +16,7 @@ const moment = require('moment-timezone');
 const BOT_TOKEN = '8280352331:AAHQ4EvZlvP6lMY7XgNaCxWEs0lX2B-Iwqs';
 const MONGODB_URI = 'mongodb+srv://sandip:9E9AISFqTfU3VI5i@cluster0.p8irtov.mongodb.net/refer_earn';
 const PORT = process.env.PORT || 8080;
-const WEB_APP_URL = 'https://web-production-41e72.up.railway.app';
+const WEB_APP_URL = 'https://web-production-41e72.up.railway.app/webapp';
 const ADMIN_IDS = [8469993808]; // Add your admin IDs here
 const EASEPAY_API = 'https://easepay.site/upiapi.php?token=0127d8b8b09c9f3c6674dd5d676a6e17&key=25d33a0508f8249ebf03ee2b36cc019e&upiid={upi_id}&amount={amount}';
 
