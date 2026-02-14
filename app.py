@@ -1,80 +1,133 @@
-# app.py - Railway Optimized Version
+# app.py - Complete Enhanced Telegram Bot with UPI Integration
 import os
-from flask import Flask, request, jsonify, render_template_string, send_from_directory, Response
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+import sys
 import json
-import logging
-from datetime import datetime, timedelta
 import time
 import random
 import string
+import hashlib
+import logging
+import threading
 import requests
 import re
-from werkzeug.utils import secure_filename
 import urllib.parse
-import hashlib
-import threading
+from datetime import datetime, timedelta
+from functools import wraps
+from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify, render_template_string, send_from_directory, Response, session
 
-# ==================== 1. RAILWAY CONFIGURATION ====================
+# MongoDB imports
+from pymongo import MongoClient
+from bson import ObjectId
+from pymongo.errors import ConnectionFailure
+
+# Telegram imports
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+
+# ==================== CONFIGURATION ====================
+# Environment variables with defaults
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8280352331:AAGwEGmIKlPnFWBeFihp9mLxbgtM_qBpATc')
-ADMIN_ID = os.environ.get('ADMIN_ID', '8469993808')
+ADMIN_IDS = [8469993808, 84897557755]  # Multiple admin IDs
 BASE_URL = os.environ.get('BASE_URL', 'web-production-3dfc9.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
 
-# Directory Paths
+# MongoDB Configuration
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb+srv://sandip:9E9AISFqTfU3VI5i@cluster0.p8irtov.mongodb.net/telegram_bot')
+DB_NAME = os.environ.get('DB_NAME', 'telegram_bot')
+
+# Directory setup
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 
-# File Paths
-USERS_FILE = os.path.join(DATA_DIR, "users.json")
-SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-WITHDRAWALS_FILE = os.path.join(DATA_DIR, "withdrawals.json")
-GIFTS_FILE = os.path.join(DATA_DIR, "gifts.json")
-LEADERBOARD_FILE = os.path.join(DATA_DIR, "leaderboard.json")
+# Create directories
+os.makedirs(STATIC_DIR, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Global cache with lock for thread safety
-cache_lock = threading.Lock()
-CACHE = {
-    'settings': None,
-    'users': None,
-    'withdrawals': None,
-    'gifts': None,
-    'leaderboard': None,
-    'last_update': 0
-}
-
-# Logging
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# App Setup
+# Flask app setup
 app = Flask(__name__, static_folder=STATIC_DIR)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# Initialize Bot
+# Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
-# Ensure Directories
-for d in [DATA_DIR, STATIC_DIR, UPLOAD_FOLDER]:
-    os.makedirs(d, exist_ok=True)
+# ==================== MONGODB CONNECTION ====================
+class MongoDB:
+    def __init__(self):
+        self.client = None
+        self.db = None
+        self.connected = False
+        self.connect()
+    
+    def connect(self):
+        """Connect to MongoDB"""
+        try:
+            self.client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            self.db = self.client[DB_NAME]
+            # Test connection
+            self.client.admin.command('ping')
+            self.connected = True
+            logger.info("✅ MongoDB connected successfully")
+            
+            # Create indexes for better performance
+            self.db.users.create_index('user_id', unique=True)
+            self.db.users.create_index('refer_code', unique=True, sparse=True)
+            self.db.withdrawals.create_index('tx_id', unique=True)
+            self.db.withdrawals.create_index([('user_id', 1), ('created_at', -1)])
+            self.db.settings.create_index('key', unique=True)
+            
+        except Exception as e:
+            self.connected = False
+            logger.error(f"❌ MongoDB connection failed: {e}")
+            logger.warning("Using file-based storage as fallback")
+    
+    def get_collection(self, name):
+        """Get MongoDB collection or fallback to dict"""
+        if self.connected:
+            return self.db[name]
+        return None
+    
+    def is_connected(self):
+        return self.connected
 
-# Initialize default files
-def init_default_files():
-    default_files = {
-        USERS_FILE: {},
-        SETTINGS_FILE: {
+mongo = MongoDB()
+
+# ==================== DATA STORAGE (MongoDB + File Fallback) ====================
+class Storage:
+    @staticmethod
+    def get_settings():
+        """Get settings from MongoDB or file"""
+        if mongo.is_connected():
+            settings = mongo.db.settings.find_one({'key': 'main'})
+            if settings:
+                # Remove MongoDB _id
+                settings.pop('_id', None)
+                settings.pop('key', None)
+                return settings
+        
+        # File fallback
+        settings_file = os.path.join(BASE_DIR, 'data', 'settings.json')
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                return json.load(f)
+        
+        # Default settings
+        return {
             "bot_name": "CYBER EARN ULTIMATE",
             "min_withdrawal": 100.0,
             "welcome_bonus": 50.0,
             "channels": [],
-            "admins": [],
+            "admins": ADMIN_IDS.copy(),
             "auto_withdraw": False,
             "bots_disabled": False,
             "ignore_device_check": False,
@@ -85,614 +138,964 @@ def init_default_files():
             "app_name": "Cyber Earn",
             "disable_channel_verification": False,
             "auto_accept_private": False,
-            "hide_verify_button": False
-        },
-        WITHDRAWALS_FILE: [],
-        GIFTS_FILE: [],
-        LEADERBOARD_FILE: {"last_updated": "2000-01-01", "data": []}
-    }
+            "hide_verify_button": False,
+            # UPI Payment Settings
+            "upi_enabled": False,
+            "upi_token": "0127d8b8b09c9f3c6674dd5d676a6e17",
+            "upi_key": "25d33a0508f8249ebf03ee2b36cc019e",
+            "upi_receiver": "",
+            "upi_mode": "manual",  # auto, manual, fake
+            "upi_api_url": "https://easepay.site/upiapi.php",
+            "upi_balance": 0,
+            "upi_min_balance_alert": 100
+        }
     
-    for filepath, default_data in default_files.items():
-        if not os.path.exists(filepath):
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(default_data, f, indent=4, ensure_ascii=False)
-            logger.info(f"Created default file: {filepath}")
-
-init_default_files()
-
-# ==================== 2. DATA MANAGEMENT (CACHED) ====================
-def load_json_cached(filepath, default, cache_key=None):
-    try:
-        with cache_lock:
-            # Use cache if available and recent (5 seconds)
-            if cache_key and CACHE[cache_key] and (time.time() - CACHE['last_update'] < 5):
-                return CACHE[cache_key].copy()  # Return copy to avoid mutation issues
-            
-            if os.path.exists(filepath):
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if cache_key:
-                        CACHE[cache_key] = data
-                        CACHE['last_update'] = time.time()
-                    return data
-            return default
-    except Exception as e:
-        logger.error(f"Error loading {filepath}: {e}")
-        return default
-
-def save_json(filepath, data):
-    try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+    @staticmethod
+    def save_settings(settings):
+        """Save settings to MongoDB and file"""
+        # Remove sensitive data from logs
+        settings_copy = settings.copy()
         
-        # Invalidate cache
-        with cache_lock:
-            if 'settings' in filepath:
-                CACHE['settings'] = None
-            elif 'users' in filepath:
-                CACHE['users'] = None
-            elif 'withdrawals' in filepath:
-                CACHE['withdrawals'] = None
-            elif 'gifts' in filepath:
-                CACHE['gifts'] = None
-            CACHE['last_update'] = time.time()
+        if mongo.is_connected():
+            mongo.db.settings.update_one(
+                {'key': 'main'},
+                {'$set': settings_copy},
+                upsert=True
+            )
         
-        return True
-    except Exception as e:
-        logger.error(f"Error saving {filepath}: {e}")
+        # File backup
+        os.makedirs(os.path.join(BASE_DIR, 'data'), exist_ok=True)
+        with open(os.path.join(BASE_DIR, 'data', 'settings.json'), 'w') as f:
+            json.dump(settings_copy, f, indent=2)
+    
+    @staticmethod
+    def get_user(user_id):
+        """Get user by ID"""
+        if mongo.is_connected():
+            user = mongo.db.users.find_one({'user_id': str(user_id)})
+            if user:
+                user.pop('_id', None)
+                return user
+        
+        # File fallback - not implemented for production
+        return None
+    
+    @staticmethod
+    def save_user(user_data):
+        """Save or update user"""
+        if mongo.is_connected():
+            mongo.db.users.update_one(
+                {'user_id': user_data['user_id']},
+                {'$set': user_data},
+                upsert=True
+            )
+            return True
         return False
-
-def get_settings():
-    with cache_lock:
-        if CACHE['settings'] and (time.time() - CACHE['last_update'] < 5):
-            return CACHE['settings'].copy()
     
-    defaults = {
-        "bot_name": "CYBER EARN ULTIMATE",
-        "min_withdrawal": 100.0,
-        "welcome_bonus": 50.0,
-        "channels": [],
-        "admins": [],
-        "auto_withdraw": False,
-        "bots_disabled": False,
-        "ignore_device_check": False,
-        "withdraw_disabled": False,
-        "logo_filename": "logo_default.png",
-        "min_refer_reward": 10.0,
-        "max_refer_reward": 50.0,
-        "app_name": "Cyber Earn",
-        "disable_channel_verification": False,
-        "auto_accept_private": False,
-        "hide_verify_button": False
-    }
-    current = load_json_cached(SETTINGS_FILE, defaults, 'settings')
-    for k, v in defaults.items():
-        if k not in current:
-            current[k] = v
-    with cache_lock:
-        CACHE['settings'] = current
-    return current.copy()
+    @staticmethod
+    def get_all_users():
+        """Get all users"""
+        if mongo.is_connected():
+            users = list(mongo.db.users.find())
+            for user in users:
+                user.pop('_id', None)
+            return users
+        return []
+    
+    @staticmethod
+    def create_withdrawal(withdrawal_data):
+        """Create withdrawal record"""
+        if mongo.is_connected():
+            result = mongo.db.withdrawals.insert_one(withdrawal_data)
+            return str(result.inserted_id)
+        return None
+    
+    @staticmethod
+    def update_withdrawal(tx_id, update_data):
+        """Update withdrawal record"""
+        if mongo.is_connected():
+            mongo.db.withdrawals.update_one(
+                {'tx_id': tx_id},
+                {'$set': update_data}
+            )
+            return True
+        return False
+    
+    @staticmethod
+    def get_withdrawals(user_id=None, status=None, limit=100):
+        """Get withdrawals with filters"""
+        if mongo.is_connected():
+            query = {}
+            if user_id:
+                query['user_id'] = str(user_id)
+            if status:
+                query['status'] = status
+            
+            withdrawals = list(mongo.db.withdrawals.find(query).sort('created_at', -1).limit(limit))
+            for w in withdrawals:
+                w.pop('_id', None)
+            return withdrawals
+        return []
+    
+    @staticmethod
+    def get_pending_withdrawals():
+        """Get all pending withdrawals"""
+        return Storage.get_withdrawals(status='pending')
+    
+    @staticmethod
+    def create_gift_code(gift_data):
+        """Create gift code"""
+        if mongo.is_connected():
+            result = mongo.db.gift_codes.insert_one(gift_data)
+            return str(result.inserted_id)
+        return None
+    
+    @staticmethod
+    def get_gift_code(code):
+        """Get gift code by code"""
+        if mongo.is_connected():
+            gift = mongo.db.gift_codes.find_one({'code': code.upper()})
+            if gift:
+                gift.pop('_id', None)
+                return gift
+        return None
+    
+    @staticmethod
+    def update_gift_code(code, update_data):
+        """Update gift code"""
+        if mongo.is_connected():
+            mongo.db.gift_codes.update_one(
+                {'code': code.upper()},
+                {'$set': update_data}
+            )
+            return True
+        return False
+    
+    @staticmethod
+    def get_all_gift_codes():
+        """Get all gift codes"""
+        if mongo.is_connected():
+            gifts = list(mongo.db.gift_codes.find().sort('created_at', -1))
+            for g in gifts:
+                g.pop('_id', None)
+            return gifts
+        return []
 
-def is_admin(user_id):
-    s = get_settings()
-    uid = str(user_id)
-    return uid == str(ADMIN_ID) or uid in s.get('admins', [])
+# ==================== UPI PAYMENT INTEGRATION ====================
+class UPIPayment:
+    @staticmethod
+    def send_payment(upi_id, amount, comment=""):
+        """Send UPI payment using API"""
+        settings = Storage.get_settings()
+        
+        # Check if UPI is enabled
+        if not settings.get('upi_enabled', False):
+            return {
+                'status': 'error',
+                'message': 'UPI payments are currently disabled'
+            }
+        
+        # Check payment mode
+        mode = settings.get('upi_mode', 'manual')
+        
+        if mode == 'fake':
+            # Fake payment for testing
+            return {
+                'status': 'success',
+                'message': 'Fake payment processed successfully',
+                'txn_id': f"FAKE{random.randint(10000000, 99999999)}",
+                'amount_sent': amount,
+                'mode': 'fake'
+            }
+        
+        elif mode == 'manual':
+            # Manual payment - just record and notify admin
+            return {
+                'status': 'pending',
+                'message': 'Payment request sent to admin',
+                'mode': 'manual'
+            }
+        
+        elif mode == 'auto':
+            # Auto payment via API
+            try:
+                url = settings.get('upi_api_url', 'https://easepay.site/upiapi.php')
+                payload = {
+                    "token": settings.get('upi_token', ''),
+                    "key": settings.get('upi_key', ''),
+                    "upiid": upi_id,
+                    "amount": str(amount)
+                }
+                
+                response = requests.post(url, data=payload, timeout=10)
+                data = response.json()
+                
+                if data.get('status') == 'success':
+                    return {
+                        'status': 'success',
+                        'message': data.get('message', 'Payment successful'),
+                        'txn_id': data.get('txn_id', ''),
+                        'amount_sent': data.get('amount_sent', amount),
+                        'total_deducted': data.get('total_deducted', amount),
+                        'remaining_balance': data.get('remaining_balance', 0)
+                    }
+                else:
+                    return {
+                        'status': 'error',
+                        'message': data.get('message', 'Payment failed')
+                    }
+            
+            except requests.exceptions.Timeout:
+                return {
+                    'status': 'error',
+                    'message': 'Payment gateway timeout'
+                }
+            except Exception as e:
+                logger.error(f"UPI payment error: {e}")
+                return {
+                    'status': 'error',
+                    'message': f'Payment error: {str(e)}'
+                }
+        
+        return {
+            'status': 'error',
+            'message': 'Invalid payment mode'
+        }
+    
+    @staticmethod
+    def check_balance():
+        """Check UPI wallet balance"""
+        settings = Storage.get_settings()
+        
+        if settings.get('upi_mode') != 'auto':
+            return {'balance': 0, 'status': 'manual'}
+        
+        try:
+            # Using the balance check endpoint (you may need to adjust this)
+            url = "https://easepay.site/balance.php"
+            payload = {
+                "token": settings.get('upi_token', ''),
+                "key": settings.get('upi_key', '')
+            }
+            
+            response = requests.post(url, data=payload, timeout=10)
+            data = response.json()
+            
+            if data.get('status') == 'success':
+                balance = float(data.get('balance', 0))
+                # Update settings with balance
+                settings['upi_balance'] = balance
+                Storage.save_settings(settings)
+                return {'balance': balance, 'status': 'success'}
+            
+            return {'balance': 0, 'status': 'error', 'message': data.get('message', 'Unknown error')}
+        
+        except Exception as e:
+            logger.error(f"Balance check error: {e}")
+            return {'balance': 0, 'status': 'error', 'message': str(e)}
 
-# ==================== 3. UTILS ====================
-def safe_send_message(chat_id, text, reply_markup=None):
-    try:
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=reply_markup)
-    except Exception as e:
-        logger.error(f"Send Error {chat_id}: {e}")
-
-def get_user_full_name(user):
-    name_parts = []
-    if user.first_name:
-        # Remove special characters and emojis for display
-        clean_name = re.sub(r'[^\w\s]', '', user.first_name)
-        if clean_name.strip():
-            name_parts.append(clean_name)
-    if user.last_name:
-        clean_last = re.sub(r'[^\w\s]', '', user.last_name)
-        if clean_last.strip():
-            name_parts.append(clean_last)
-    return " ".join(name_parts) if name_parts else "User"
-
-def get_user_display_name(user):
-    """Get user's username or cleaned name"""
-    if user.username:
-        return f"@{user.username}"
-    return get_user_full_name(user)
-
+# ==================== UTILITY FUNCTIONS ====================
 def generate_code(length=5):
+    """Generate random code"""
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 def generate_refer_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
+    """Generate unique referral code"""
+    return generate_code(7)
 
-def generate_device_fingerprint(ip, user_agent, other_data=""):
-    """Generate a unique device fingerprint"""
-    data = f"{ip}|{user_agent}|{other_data}"
-    return hashlib.md5(data.encode()).hexdigest()
+def generate_tx_id():
+    """Generate transaction ID"""
+    return f"TXN{int(time.time())}{random.randint(1000, 9999)}"
 
-def update_leaderboard():
+def is_admin(user_id):
+    """Check if user is admin"""
+    return str(user_id) in [str(admin_id) for admin_id in ADMIN_IDS]
+
+def get_user_full_name(user):
+    """Get user's full name safely"""
+    name_parts = []
+    if user.first_name:
+        name_parts.append(user.first_name)
+    if user.last_name:
+        name_parts.append(user.last_name)
+    return " ".join(name_parts) if name_parts else "User"
+
+def safe_send_message(chat_id, text, reply_markup=None, parse_mode="Markdown"):
+    """Safely send message with error handling"""
     try:
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        leaderboard = []
-        for uid, user_data in users.items():
-            leaderboard.append({
-                "user_id": uid,
-                "name": user_data.get("name", "Unknown"),
-                "balance": float(user_data.get("balance", 0)),
-                "total_refers": len(user_data.get("referred_users", []))
-            })
-        leaderboard.sort(key=lambda x: x["balance"], reverse=True)
-        leaderboard = leaderboard[:20]
-        
-        data = {"last_updated": datetime.now().isoformat(), "data": leaderboard}
-        save_json(LEADERBOARD_FILE, data)
-        with cache_lock:
-            CACHE['leaderboard'] = data
-        return data
+        bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception as e:
-        logger.error(f"Error updating leaderboard: {e}")
-        return {"last_updated": datetime.now().isoformat(), "data": []}
+        logger.error(f"Send message error to {chat_id}: {e}")
 
-def check_gift_code_expiry():
-    gifts = load_json_cached(GIFTS_FILE, [], 'gifts')
-    updated = False
-    current_time = datetime.now()
-    
-    for gift in gifts[:]:
-        # Check expiry time
-        if "expiry" in gift:
-            try:
-                expiry_time = datetime.fromisoformat(gift["expiry"])
-                if expiry_time < current_time:
-                    gift["expired"] = True
-                    updated = True
-            except:
-                pass
-        
-        # Check if usage limit reached
-        if not gift.get('expired') and 'used_by' in gift and 'total_uses' in gift:
-            if len(gift['used_by']) >= gift['total_uses']:
-                gift["expired"] = True
-                updated = True
-    
-    if updated:
-        save_json(GIFTS_FILE, gifts)
-    return gifts
+def generate_device_fingerprint(ip, user_agent, extra=""):
+    """Generate device fingerprint"""
+    data = f"{ip}|{user_agent}|{extra}|{datetime.now().strftime('%Y%m%d')}"
+    return hashlib.sha256(data.encode()).hexdigest()
 
-def get_user_status(user_data, settings):
-    """Determine user status based on verification requirements"""
-    if user_data.get('verified', False):
-        # User is verified if they meet current requirements
-        needs_device = not settings.get('ignore_device_check', False)
-        device_ok = user_data.get('device_verified', False) or not needs_device
-        
-        # Check channels if not disabled
-        channels_ok = True
-        if settings['channels'] and not settings.get('disable_channel_verification', False):
-            # Check if user has passed channel verification
-            last_check = user_data.get('last_channel_check')
-            if last_check:
-                try:
-                    last_check_time = datetime.fromisoformat(last_check)
-                    # Consider channel check valid for 5 minutes
-                    if (datetime.now() - last_check_time).total_seconds() > 300:
-                        channels_ok = False
-                except:
-                    channels_ok = False
-            else:
-                channels_ok = False
-        
-        return "verified" if device_ok and channels_ok else "pending"
-    else:
-        return "pending"
-
-# Custom Jinja2 filter
-def datetime_from_isoformat(value):
-    try:
-        return datetime.fromisoformat(value)
-    except:
-        return datetime.now()
-
-app.jinja_env.filters['fromisoformat'] = datetime_from_isoformat
-
-# ==================== 4. PRIVATE CHANNEL HANDLER ====================
-def handle_private_channel(channel_id, user_id, channel_name):
-    """Handle private channel join requests"""
-    try:
-        # Check if user is already a member
-        member = bot.get_chat_member(channel_id, user_id)
-        if member.status in ['member', 'administrator', 'creator', 'restricted']:
-            return True, "Already a member"
-        
-        # Check if bot is admin in the channel
-        bot_member = bot.get_chat_member(channel_id, bot.get_me().id)
-        if bot_member.status not in ['administrator', 'creator']:
-            return False, f"Bot is not admin in {channel_name}"
-        
-        # Try to approve join request if exists
-        try:
-            bot.approve_chat_join_request(channel_id, user_id)
-            return True, f"Join request approved for {channel_name}"
-        except Exception as e:
-            if "CHAT_JOIN_REQUEST_NOT_FOUND" in str(e):
-                # Send join request
-                try:
-                    chat_invite_link = bot.create_chat_invite_link(channel_id, creates_join_request=True)
-                    return False, f"Join request sent to {channel_name}. Please wait for admin approval."
-                except Exception as e2:
-                    return False, f"Could not send join request to {channel_name}"
-            return False, f"Error approving join request for {channel_name}"
-    except Exception as e:
-        logger.error(f"Private channel error: {e}")
-        return False, f"Error checking {channel_name}"
-
-# ==================== 5. BOT HANDLERS ====================
-@bot.chat_join_request_handler()
-def auto_approve(message):
-    """Auto approve join requests for channels where bot is admin"""
-    try:
-        settings = get_settings()
-        if settings.get('auto_accept_private', False):
-            bot.approve_chat_join_request(message.chat.id, message.from_user.id)
-            logger.info(f"Auto-approved join request for user {message.from_user.id} in channel {message.chat.id}")
-    except Exception as e:
-        logger.error(f"Auto approve error: {e}")
-
+# ==================== BOT HANDLERS ====================
 @bot.message_handler(commands=['start'])
 def handle_start(message):
+    """Handle /start command"""
     try:
-        settings = get_settings()
-        uid = str(message.from_user.id)
+        user_id = str(message.from_user.id)
+        settings = Storage.get_settings()
         
-        if settings['bots_disabled'] and not is_admin(uid):
-            safe_send_message(message.chat.id, "⛔ *System Maintenance*")
+        # Check if bot is disabled
+        if settings.get('bots_disabled') and not is_admin(user_id):
+            safe_send_message(message.chat.id, "⛔ Bot is currently under maintenance. Please try again later.")
             return
         
+        # Get referral code from start parameter
         refer_code = None
         if len(message.text.split()) > 1:
             refer_code = message.text.split()[1]
         
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        is_new = uid not in users
+        # Check if user exists
+        user = Storage.get_user(user_id)
+        is_new = user is None
         
         if is_new:
-            user_refer_code = generate_refer_code()
-            while any(user.get('refer_code') == user_refer_code for user in users.values()):
-                user_refer_code = generate_refer_code()
+            # Create new user
+            refer_code_to_use = generate_refer_code()
+            # Ensure unique refer code
+            while True:
+                existing_users = Storage.get_all_users()
+                existing_codes = [u.get('refer_code') for u in existing_users if u.get('refer_code')]
+                if refer_code_to_use not in existing_codes:
+                    break
+                refer_code_to_use = generate_refer_code()
             
-            full_name = get_user_full_name(message.from_user)
-            users[uid] = {
+            user_data = {
+                "user_id": user_id,
                 "balance": 0.0,
                 "verified": False,
-                "name": full_name,
+                "name": get_user_full_name(message.from_user),
                 "username": message.from_user.username,
                 "joined_date": datetime.now().isoformat(),
                 "ip": None,
                 "device_id": None,
                 "device_verified": False,
-                "refer_code": user_refer_code,
+                "refer_code": refer_code_to_use,
                 "referred_by": refer_code if refer_code else None,
                 "referred_users": [],
                 "claimed_gifts": [],
-                "last_channel_check": None
+                "last_channel_check": None,
+                "total_withdrawn": 0.0,
+                "last_active": datetime.now().isoformat()
             }
-            save_json(USERS_FILE, users)
+            Storage.save_user(user_data)
             
-            msg = f"🔔 *New User*\nName: {full_name}\nID: `{uid}`"
+            # Notify admins
+            admin_msg = f"🔔 *New User*\nName: {user_data['name']}\nID: `{user_id}`"
             if message.from_user.username:
-                msg += f"\nUsername: @{message.from_user.username}"
+                admin_msg += f"\nUsername: @{message.from_user.username}"
             if refer_code:
-                msg += f"\nReferred by: `{refer_code}`"
-            safe_send_message(ADMIN_ID, msg)
-            for adm in settings.get('admins', []):
-                safe_send_message(adm, msg)
+                admin_msg += f"\nReferred by: `{refer_code}`"
+            
+            for admin_id in ADMIN_IDS:
+                safe_send_message(admin_id, admin_msg)
         
-        display_name = get_user_display_name(message.from_user)
-        # Remove special characters for URL encoding
-        clean_display_name = re.sub(r'[^\w\s]', '', display_name)
-        if not clean_display_name.strip():
-            clean_display_name = settings.get('app_name', 'USER')
+        else:
+            # Update last active
+            user['last_active'] = datetime.now().isoformat()
+            Storage.save_user(user)
         
-        clean_display_name = urllib.parse.quote(clean_display_name)
-        img_url = f"https://res.cloudinary.com/dneusgyzc/image/upload/v1767971399/IMG_20260109_203909_698_wr66ik.jpg"
+        # Create welcome message with buttons
+        display_name = user.get('name', 'User') if not is_new else get_user_full_name(message.from_user)
         
+        # Create inline keyboard
         markup = InlineKeyboardMarkup(row_width=1)
         
-        # Always show channels on start regardless of verification settings
-        for ch in settings['channels']:
-            markup.add(InlineKeyboardButton(ch.get('btn_name', 'Channel'), url=ch.get('link', '#')))
+        # Add channel buttons
+        for ch in settings.get('channels', []):
+            if not ch.get('disabled', False):
+                markup.add(InlineKeyboardButton(
+                    ch.get('btn_name', 'Channel'), 
+                    url=ch.get('link', '#')
+                ))
         
-        # Only show verify button if not hidden in settings
+        # Add verify button (if not hidden)
         if not settings.get('hide_verify_button', False):
-            web_app = WebAppInfo(url=f"{BASE_URL}/mini_app?user_id={uid}")
-            markup.add(InlineKeyboardButton("✅ VERIFY & START EARNING", web_app=web_app))
+            web_app_url = f"{BASE_URL}/mini_app?user_id={user_id}&t={int(time.time())}"
+            markup.add(InlineKeyboardButton(
+                "🚀 OPEN EARNING APP", 
+                web_app=WebAppInfo(url=web_app_url)
+            ))
         
-        if is_admin(uid):
-            markup.add(InlineKeyboardButton("👑 Open Admin Panel", url=f"{BASE_URL}/admin_panel?user_id={uid}"))
+        # Admin panel button
+        if is_admin(user_id):
+            markup.add(InlineKeyboardButton(
+                "⚙️ ADMIN PANEL", 
+                url=f"{BASE_URL}/admin_panel?user_id={user_id}&t={int(time.time())}"
+            ))
+        
+        welcome_text = f"""🎉 *WELCOME {display_name}!* 🎉
 
-        cap = f"👋 *WELCOME {display_name}!*\n\n🚀 Complete the steps below to start earning ₹{settings['welcome_bonus']}!"
-        
+🚀 *Start Earning Money Today!*
+
+💰 Get ₹{settings.get('welcome_bonus', 50)} welcome bonus
+👥 Earn up to ₹{settings.get('max_refer_reward', 50)} per referral
+💸 Instant withdrawals via UPI
+🎁 Daily gift codes
+
+👇 *Complete these steps:*
+1️⃣ Join all channels below
+2️⃣ Click the OPEN EARNING APP button
+3️⃣ Complete verification
+4️⃣ Start earning!"""
+
+        # Try to send with logo
         try:
-            bot.send_photo(message.chat.id, img_url, caption=cap, parse_mode="Markdown", reply_markup=markup)
-        except:
-            safe_send_message(message.chat.id, cap, reply_markup=markup)
-            
+            logo_url = f"{BASE_URL}/static/{settings.get('logo_filename', 'logo_default.png')}"
+            bot.send_photo(
+                message.chat.id,
+                logo_url,
+                caption=welcome_text,
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Photo send error: {e}")
+            # Fallback to text only
+            safe_send_message(message.chat.id, welcome_text, reply_markup=markup)
+    
     except Exception as e:
         logger.error(f"Start handler error: {e}")
+        safe_send_message(message.chat.id, "An error occurred. Please try again later.")
 
-# ==================== 6. WEBAPP ROUTES ====================
+@bot.chat_join_request_handler()
+def handle_join_request(message):
+    """Auto-approve join requests for private channels"""
+    try:
+        settings = Storage.get_settings()
+        if settings.get('auto_accept_private', False):
+            bot.approve_chat_join_request(message.chat.id, message.from_user.id)
+            logger.info(f"Auto-approved join request for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Join request error: {e}")
+
+@bot.message_handler(commands=['balance'])
+def handle_balance(message):
+    """Check balance command"""
+    try:
+        user_id = str(message.from_user.id)
+        user = Storage.get_user(user_id)
+        
+        if user:
+            balance = float(user.get('balance', 0))
+            safe_send_message(
+                message.chat.id,
+                f"💰 *Your Balance*\n\nCurrent Balance: ₹{balance:.2f}\nTotal Withdrawn: ₹{float(user.get('total_withdrawn', 0)):.2f}",
+                parse_mode="Markdown"
+            )
+        else:
+            safe_send_message(message.chat.id, "Please start the bot first with /start")
+    
+    except Exception as e:
+        logger.error(f"Balance command error: {e}")
+
+@bot.message_handler(commands=['refer'])
+def handle_refer(message):
+    """Get referral link"""
+    try:
+        user_id = str(message.from_user.id)
+        user = Storage.get_user(user_id)
+        
+        if user:
+            refer_code = user.get('refer_code')
+            if not refer_code:
+                refer_code = generate_refer_code()
+                user['refer_code'] = refer_code
+                Storage.save_user(user)
+            
+            bot_username = bot.get_me().username
+            refer_link = f"https://t.me/{bot_username}?start={refer_code}"
+            
+            referred_count = len(user.get('referred_users', []))
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("📋 Copy Referral Link", url=refer_link))
+            markup.add(InlineKeyboardButton("👥 My Referrals", web_app=WebAppInfo(url=f"{BASE_URL}/mini_app?user_id={user_id}&tab=refer")))
+            
+            safe_send_message(
+                message.chat.id,
+                f"👥 *Your Referral Info*\n\n"
+                f"📌 Your Code: `{refer_code}`\n"
+                f"🔗 Your Link: {refer_link}\n\n"
+                f"👤 Total Referrals: {referred_count}\n"
+                f"💰 Earn up to ₹{Storage.get_settings().get('max_refer_reward', 50)} per referral!",
+                reply_markup=markup
+            )
+        else:
+            safe_send_message(message.chat.id, "Please start the bot first with /start")
+    
+    except Exception as e:
+        logger.error(f"Refer command error: {e}")
+
+# ==================== FLASK ROUTES ====================
 @app.route('/')
 def home():
-    return "Telegram Bot is running! Use /start in Telegram."
+    """Home route"""
+    bot_username = "bot"
+    try:
+        bot_username = bot.get_me().username
+    except:
+        pass
+    
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Bot Status</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; color: white; text-align: center; }
+            .card { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); padding: 40px; border-radius: 20px; box-shadow: 0 8px 32px rgba(0,0,0,0.1); }
+            h1 { font-size: 2.5em; margin-bottom: 10px; }
+            .status { display: inline-block; padding: 8px 20px; background: rgba(0,255,0,0.2); border-radius: 50px; margin: 20px 0; }
+            .btn { display: inline-block; padding: 12px 30px; background: white; color: #764ba2; text-decoration: none; border-radius: 50px; font-weight: bold; margin-top: 20px; }
+            .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0,0,0,0.2); }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>🚀 Telegram Bot</h1>
+            <div class="status">✅ Bot is running</div>
+            <p>MongoDB: {{ '✅ Connected' if mongo_connected else '❌ Using file storage' }}</p>
+            <p>Total Users: {{ user_count }}</p>
+            <a href="https://t.me/{{ bot_username }}" class="btn">Open in Telegram</a>
+        </div>
+    </body>
+    </html>
+    """, mongo_connected=mongo.is_connected(), user_count=len(Storage.get_all_users()), bot_username=bot_username)
 
 @app.route('/mini_app')
 def mini_app():
+    """Main mini app interface"""
     try:
-        uid = request.args.get('user_id')
-        if not uid:
+        user_id = request.args.get('user_id')
+        if not user_id:
             return "User ID required", 400
-            
-        settings = get_settings()
         
-        # Fast loading - load data directly
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        leaderboard_data = load_json_cached(LEADERBOARD_FILE, {"last_updated": "2000-01-01", "data": []}, 'leaderboard')
+        user = Storage.get_user(user_id)
+        if not user:
+            return "User not found", 404
         
-        user = users.get(str(uid), {"name": "Guest", "balance": 0.0, "verified": False, "device_verified": False})
+        settings = Storage.get_settings()
         
-        # Determine user status
-        user_status = get_user_status(user, settings)
+        # Check verification status
+        user_status = "pending"
+        if user.get('verified'):
+            needs_device = not settings.get('ignore_device_check', False)
+            device_ok = user.get('device_verified', False) or not needs_device
+            
+            channels_ok = True
+            if settings.get('channels') and not settings.get('disable_channel_verification', False):
+                last_check = user.get('last_channel_check')
+                if last_check:
+                    try:
+                        last_check_time = datetime.fromisoformat(last_check)
+                        if (datetime.now() - last_check_time).total_seconds() < 300:
+                            channels_ok = True
+                        else:
+                            channels_ok = False
+                    except:
+                        channels_ok = False
+                else:
+                    channels_ok = False
+            
+            user_status = "verified" if device_ok and channels_ok else "pending"
         
-        # Auto verify if channel verification is disabled
-        if settings.get('disable_channel_verification', False) and not user.get('verified', False):
-            user['verified'] = True
-            user['last_channel_check'] = datetime.now().isoformat()
-            
-            # Give welcome bonus if this is first verification
-            try: 
-                bonus = float(settings.get('welcome_bonus', 50))
-            except: 
-                bonus = 50.0
-            
-            user['balance'] = float(user.get('balance', 0)) + bonus
-            user_status = "verified"
-            
-            # Save updated user data
-            save_json(USERS_FILE, users)
-            
-            # Add bonus transaction
-            w_list = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-            w_list.append({
-                "tx_id": "BONUS", 
-                "user_id": uid, 
-                "name": "Signup Bonus",
-                "amount": bonus, 
-                "upi": "-", 
-                "status": "completed",
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Get leaderboard
+        all_users = Storage.get_all_users()
+        leaderboard = []
+        for u in all_users:
+            leaderboard.append({
+                "user_id": u.get('user_id'),
+                "name": u.get('name', 'User'),
+                "balance": float(u.get('balance', 0)),
+                "total_refers": len(u.get('referred_users', []))
             })
-            save_json(WITHDRAWALS_FILE, w_list)
+        leaderboard.sort(key=lambda x: x['balance'], reverse=True)
+        leaderboard = leaderboard[:20]
         
-        return render_template_string(MINI_APP_TEMPLATE, 
-            user=user, 
-            user_id=uid, 
-            settings=settings, 
-            base_url=BASE_URL, 
+        # Get recent withdrawals
+        recent_withdrawals = Storage.get_withdrawals(user_id=user_id, limit=10)
+        
+        return render_template_string(MINI_APP_TEMPLATE,
+            user=user,
+            user_id=user_id,
+            settings=settings,
+            base_url=BASE_URL,
+            leaderboard=leaderboard,
+            withdrawals=recent_withdrawals,
+            user_status=user_status,
             timestamp=int(time.time()),
-            leaderboard=leaderboard_data.get("data", []),
-            now=datetime.now().isoformat(),
-            user_status=user_status
+            now=datetime.now().isoformat()
         )
+    
     except Exception as e:
         logger.error(f"Mini app error: {e}")
-        return "Internal Server Error", 500
-
-@app.route('/get_pfp')
-def get_pfp():
-    uid = request.args.get('uid')
-    try:
-        photos = bot.get_user_profile_photos(uid)
-        if photos.total_count > 0:
-            file_id = photos.photos[0][0].file_id
-            file_info = bot.get_file(file_id)
-            dl_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-            return Response(requests.get(dl_url, timeout=3).content, mimetype='image/jpeg')
-    except Exception as e:
-        logger.error(f"PFP error: {e}")
-    return "No Image", 404
+        return f"Error: {str(e)}", 500
 
 @app.route('/api/verify', methods=['POST'])
 def api_verify():
+    """Verify user membership and device"""
     try:
         data = request.json
-        uid = str(data.get('user_id', ''))
-        fp = str(data.get('fp', ''))
+        user_id = str(data.get('user_id'))
+        fingerprint = data.get('fp', '')
         user_agent = request.headers.get('User-Agent', '')
         client_ip = request.remote_addr
         
-        if not uid:
+        if not user_id:
             return jsonify({'ok': False, 'msg': 'User ID required'})
         
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        settings = get_settings()
-        
-        if uid not in users:
+        user = Storage.get_user(user_id)
+        if not user:
             return jsonify({'ok': False, 'msg': 'User not found'})
         
-        # Generate proper device fingerprint
-        device_fingerprint = generate_device_fingerprint(client_ip, user_agent, fp)
+        settings = Storage.get_settings()
         
         verification_steps = []
         channel_errors = []
         
-        # Step 1: Check device verification (if enabled)
-        needs_device_check = not settings.get('ignore_device_check', False)
-        
-        if needs_device_check and fp and fp != 'skip':
-            verification_steps.append({"step": "device", "status": "checking", "message": "Checking device..."})
+        # Device verification
+        needs_device = not settings.get('ignore_device_check', False)
+        if needs_device:
+            device_fp = generate_device_fingerprint(client_ip, user_agent, fingerprint)
             
-            if not users[uid].get('device_verified'):
-                # Check for same device across different accounts
-                device_error = None
-                for u_id, u_data in users.items():
-                    if u_id == uid: 
-                        continue
-                    if u_data.get('device_verified') and str(u_data.get('device_id', '')) == device_fingerprint:
-                        device_error = '⚠️ Device already used by another account! Please use a different device or clear browser data.'
-                        break
-                
-                if device_error:
-                    verification_steps.append({"step": "device", "status": "failed", "message": device_error})
-                    return jsonify({
-                        'ok': False, 
-                        'msg': device_error, 
-                        'type': 'device',
-                        'steps': verification_steps,
-                        'retry': True
-                    })
-                else:
-                    users[uid]['device_id'] = device_fingerprint
-                    users[uid]['device_verified'] = True
-                    verification_steps.append({"step": "device", "status": "passed", "message": "Device verified ✓"})
-            else:
-                verification_steps.append({"step": "device", "status": "passed", "message": "Device already verified ✓"})
-        elif not needs_device_check:
-            verification_steps.append({"step": "device", "status": "passed", "message": "Device check disabled ✓"})
+            # Check for duplicate devices
+            all_users = Storage.get_all_users()
+            for other_user in all_users:
+                if other_user.get('user_id') != user_id and other_user.get('device_id') == device_fp:
+                    if other_user.get('device_verified'):
+                        return jsonify({
+                            'ok': False,
+                            'msg': '⚠️ This device is already registered with another account',
+                            'type': 'device',
+                            'retry': True
+                        })
+            
+            user['device_id'] = device_fp
+            user['device_verified'] = True
+            verification_steps.append({"step": "device", "status": "passed", "message": "✅ Device verified"})
         
-        # Step 2: Check all channels (only if channel verification is not disabled)
-        verification_steps.append({"step": "channels", "status": "checking", "message": "Checking channel memberships..."})
-        
-        if settings['channels'] and not settings.get('disable_channel_verification', False):
-            for idx, ch in enumerate(settings['channels']):
-                channel_name = ch.get('btn_name', f'Channel {idx+1}')
-                channel_disabled = ch.get('disabled', False)
-                
-                # Skip verification for disabled channels
-                if channel_disabled:
-                    verification_steps.append({"step": f"channel_{idx}", "status": "passed", "message": f"{channel_name} - Verification disabled ✓"})
+        # Channel verification
+        if settings.get('channels') and not settings.get('disable_channel_verification', False):
+            for idx, channel in enumerate(settings['channels']):
+                if channel.get('disabled'):
                     continue
                 
+                channel_name = channel.get('btn_name', f'Channel {idx+1}')
+                channel_id = channel.get('id', '')
+                
                 try:
-                    if ch.get('id'):
-                        # Try to get member status
-                        member = bot.get_chat_member(ch['id'], uid)
+                    if channel_id:
+                        # Clean channel ID
+                        channel_id = channel_id.strip()
+                        if channel_id.startswith('@'):
+                            channel_id = channel_id[1:]
+                        
+                        member = bot.get_chat_member(f"@{channel_id}", user_id)
                         if member.status not in ['member', 'administrator', 'creator', 'restricted']:
                             channel_errors.append(channel_name)
-                except:
+                except Exception as e:
+                    logger.error(f"Channel check error for {channel_id}: {e}")
                     channel_errors.append(channel_name)
         
-        # Return specific errors
         if channel_errors:
-            verification_steps.append({"step": "channels", "status": "failed", "message": f"Please join: {', '.join(channel_errors)}"})
             return jsonify({
-                'ok': False, 
-                'msg': f"Please join: {', '.join(channel_errors)}", 
+                'ok': False,
+                'msg': f"Please join: {', '.join(channel_errors)}",
                 'type': 'channels',
                 'steps': verification_steps,
                 'retry': True
             })
         
-        verification_steps.append({"step": "channels", "status": "passed", "message": "All channels verified ✓"})
+        # Update verification status
+        was_verified = user.get('verified', False)
+        user['verified'] = True
+        user['last_channel_check'] = datetime.now().isoformat()
         
-        # All checks passed
-        users[uid]['last_channel_check'] = datetime.now().isoformat()
-        
-        # Determine if this is first time verification
-        is_first_verification = not users[uid].get('verified', False)
-        
-        if is_first_verification:
-            try: 
+        # Give welcome bonus if first time
+        bonus = 0
+        if not was_verified:
+            try:
                 bonus = float(settings.get('welcome_bonus', 50))
-            except: 
-                bonus = 50.0
-            
-            users[uid].update({
-                'verified': True,
-                'ip': client_ip,
-                'balance': float(users[uid].get('balance', 0)) + bonus
-            })
-            
-            # Give referral bonus to referrer ONLY when referred user verifies
-            if users[uid].get('referred_by'):
-                refer_code = users[uid]['referred_by']
-                for referrer_id, referrer_data in users.items():
-                    if referrer_data.get('refer_code') == refer_code:
-                        if uid not in referrer_data.get('referred_users', []):
-                            min_reward = float(settings.get('min_refer_reward', 10))
-                            max_reward = float(settings.get('max_refer_reward', 50))
-                            reward = random.uniform(min_reward, max_reward)
-                            reward = round(reward, 2)
-                            
-                            referrer_data['balance'] = float(referrer_data.get('balance', 0)) + reward
-                            if 'referred_users' not in referrer_data:
-                                referrer_data['referred_users'] = []
-                            referrer_data['referred_users'].append(uid)
-                            
-                            w_list = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-                            w_list.append({
-                                "tx_id": f"REF-VERIFY-{generate_code(5)}",
-                                "user_id": referrer_id,
-                                "name": "Referral Bonus (Verified)",
-                                "amount": reward,
-                                "upi": "-",
-                                "status": "completed",
-                                "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-                            })
-                            save_json(WITHDRAWALS_FILE, w_list)
-                            
-                            safe_send_message(referrer_id, f"🎉 *Referral Bonus!*\nYou earned ₹{reward} for {users[uid]['name']}'s verification")
-                        break
-            
-            w_list = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-            w_list.append({
-                "tx_id": "BONUS", 
-                "user_id": uid, 
-                "name": "Signup Bonus",
-                "amount": bonus, 
-                "upi": "-", 
-                "status": "completed",
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-            })
-            save_json(WITHDRAWALS_FILE, w_list)
-            
-            verification_steps.append({"step": "bonus", "status": "passed", "message": f"₹{bonus} bonus added ✓"})
-        else:
-            verification_steps.append({"step": "bonus", "status": "passed", "message": "Already verified ✓"})
+                user['balance'] = float(user.get('balance', 0)) + bonus
+                
+                # Create transaction record
+                tx_id = generate_tx_id()
+                withdrawal_data = {
+                    "tx_id": tx_id,
+                    "user_id": user_id,
+                    "name": "Welcome Bonus",
+                    "amount": bonus,
+                    "status": "completed",
+                    "type": "bonus",
+                    "created_at": datetime.now().isoformat()
+                }
+                Storage.create_withdrawal(withdrawal_data)
+                
+                verification_steps.append({"step": "bonus", "status": "passed", "message": f"✨ ₹{bonus} bonus added"})
+                
+                # Handle referral bonus
+                if user.get('referred_by'):
+                    refer_code = user['referred_by']
+                    all_users = Storage.get_all_users()
+                    for referrer in all_users:
+                        if referrer.get('refer_code') == refer_code:
+                            if user_id not in referrer.get('referred_users', []):
+                                # Calculate random reward
+                                min_reward = float(settings.get('min_refer_reward', 10))
+                                max_reward = float(settings.get('max_refer_reward', 50))
+                                reward = round(random.uniform(min_reward, max_reward), 2)
+                                
+                                referrer['balance'] = float(referrer.get('balance', 0)) + reward
+                                referrer.setdefault('referred_users', []).append(user_id)
+                                Storage.save_user(referrer)
+                                
+                                # Create referral bonus record
+                                ref_tx_id = generate_tx_id()
+                                ref_data = {
+                                    "tx_id": ref_tx_id,
+                                    "user_id": referrer['user_id'],
+                                    "name": "Referral Bonus",
+                                    "amount": reward,
+                                    "status": "completed",
+                                    "type": "referral",
+                                    "referred_user": user_id,
+                                    "created_at": datetime.now().isoformat()
+                                }
+                                Storage.create_withdrawal(ref_data)
+                                
+                                # Notify referrer
+                                safe_send_message(
+                                    referrer['user_id'],
+                                    f"🎉 *Referral Bonus!*\nYou earned ₹{reward} from {user['name']}'s verification!"
+                                )
+                            break
+            except Exception as e:
+                logger.error(f"Bonus error: {e}")
         
-        save_json(USERS_FILE, users)
+        Storage.save_user(user)
         
         return jsonify({
-            'ok': True, 
-            'bonus': bonus if is_first_verification else 0, 
-            'balance': users[uid]['balance'], 
+            'ok': True,
+            'bonus': bonus,
+            'balance': user['balance'],
             'verified': True,
-            'device_verified': users[uid].get('device_verified', False),
+            'device_verified': user.get('device_verified', False),
             'steps': verification_steps
         })
     
     except Exception as e:
-        logger.error(f"Verify error: {e}")
-        return jsonify({'ok': False, 'msg': f"Error: {str(e)}", 'retry': True})
+        logger.error(f"Verify API error: {e}")
+        return jsonify({'ok': False, 'msg': f"Error: {str(e)}"})
+
+@app.route('/api/withdraw', methods=['POST'])
+def api_withdraw():
+    """Process withdrawal request"""
+    try:
+        data = request.json
+        user_id = str(data.get('user_id'))
+        amount = float(data.get('amount', 0))
+        upi_id = str(data.get('upi', '')).strip()
+        
+        if not user_id:
+            return jsonify({'ok': False, 'msg': 'User ID required'})
+        
+        if not upi_id or not re.match(r'^[\w\.\-_]{2,}@[\w]{2,}$', upi_id):
+            return jsonify({'ok': False, 'msg': 'Invalid UPI ID format'})
+        
+        user = Storage.get_user(user_id)
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'})
+        
+        settings = Storage.get_settings()
+        
+        # Check if withdrawals are disabled
+        if settings.get('withdraw_disabled'):
+            return jsonify({'ok': False, 'msg': '❌ Withdrawals are currently disabled'})
+        
+        # Check minimum amount
+        min_withdrawal = float(settings.get('min_withdrawal', 100))
+        if amount < min_withdrawal:
+            return jsonify({'ok': False, 'msg': f'Minimum withdrawal amount is ₹{min_withdrawal}'})
+        
+        # Check balance
+        current_balance = float(user.get('balance', 0))
+        if current_balance < amount:
+            return jsonify({'ok': False, 'msg': 'Insufficient balance'})
+        
+        # Check if user is verified
+        if not user.get('verified'):
+            return jsonify({'ok': False, 'msg': 'Please complete verification first'})
+        
+        # Generate transaction ID
+        tx_id = generate_tx_id()
+        
+        # Process based on payment mode
+        payment_mode = settings.get('upi_mode', 'manual')
+        
+        # Deduct balance
+        user['balance'] = current_balance - amount
+        Storage.save_user(user)
+        
+        # Create withdrawal record
+        withdrawal_data = {
+            "tx_id": tx_id,
+            "user_id": user_id,
+            "name": user.get('name', 'User'),
+            "amount": amount,
+            "upi": upi_id,
+            "status": "pending",
+            "type": "withdrawal",
+            "mode": payment_mode,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        # Process payment based on mode
+        payment_result = None
+        if payment_mode == 'auto' and settings.get('upi_enabled'):
+            # Auto payment via API
+            payment_result = UPIPayment.send_payment(upi_id, amount)
+            
+            if payment_result['status'] == 'success':
+                withdrawal_data['status'] = 'completed'
+                withdrawal_data['completed_at'] = datetime.now().isoformat()
+                withdrawal_data['txn_id'] = payment_result.get('txn_id', '')
+                withdrawal_data['utr'] = payment_result.get('txn_id', '')
+                
+                # Update user's total withdrawn
+                user['total_withdrawn'] = float(user.get('total_withdrawn', 0)) + amount
+                Storage.save_user(user)
+                
+                # Notify user
+                safe_send_message(
+                    user_id,
+                    f"✅ *Withdrawal Successful!*\n\nAmount: ₹{amount}\nUTR: `{payment_result.get('txn_id', '')}`\nTxID: `{tx_id}`"
+                )
+                
+                # Notify admins
+                admin_msg = f"💰 *Auto Withdrawal Processed*\nUser: {user['name']}\nAmount: ₹{amount}\nUPI: {upi_id}\nTxn ID: {payment_result.get('txn_id', '')}"
+                for admin_id in ADMIN_IDS:
+                    safe_send_message(admin_id, admin_msg)
+            
+            elif payment_result['status'] == 'error':
+                # Refund balance
+                user['balance'] = current_balance
+                Storage.save_user(user)
+                
+                withdrawal_data['status'] = 'failed'
+                withdrawal_data['error'] = payment_result.get('message', 'Payment failed')
+                
+                return jsonify({
+                    'ok': False,
+                    'msg': f"Payment failed: {payment_result.get('message', 'Unknown error')}"
+                })
+        
+        elif payment_mode == 'fake':
+            # Fake payment (for testing)
+            withdrawal_data['status'] = 'completed'
+            withdrawal_data['completed_at'] = datetime.now().isoformat()
+            withdrawal_data['txn_id'] = f"FAKE{random.randint(10000000, 99999999)}"
+            withdrawal_data['utr'] = withdrawal_data['txn_id']
+            
+            # Update user's total withdrawn
+            user['total_withdrawn'] = float(user.get('total_withdrawn', 0)) + amount
+            Storage.save_user(user)
+            
+            # Notify user
+            safe_send_message(
+                user_id,
+                f"✅ *Withdrawal Successful (Test Mode)!*\n\nAmount: ₹{amount}\nUTR: `{withdrawal_data['txn_id']}`\nTxID: `{tx_id}`"
+            )
+            
+            payment_result = {'status': 'success', 'mode': 'fake'}
+        
+        else:
+            # Manual payment - just notify admin
+            admin_msg = f"""💸 *New Withdrawal Request*
+            
+User: {user['name']}
+ID: `{user_id}`
+Amount: ₹{amount}
+UPI: {upi_id}
+TxID: `{tx_id}`
+
+Click below to process this withdrawal."""
+            
+            markup = InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{tx_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{tx_id}")
+            )
+            
+            for admin_id in ADMIN_IDS:
+                safe_send_message(admin_id, admin_msg, reply_markup=markup)
+            
+            # Notify user
+            safe_send_message(
+                user_id,
+                f"✅ *Withdrawal Request Submitted!*\n\nAmount: ₹{amount}\nTxID: `{tx_id}`\n\nYour request has been sent to admin. You'll be notified once processed."
+            )
+        
+        # Save withdrawal record
+        Storage.create_withdrawal(withdrawal_data)
+        
+        return jsonify({
+            'ok': True,
+            'msg': 'Withdrawal request submitted successfully',
+            'tx_id': tx_id,
+            'new_balance': user['balance'],
+            'mode': payment_mode,
+            'payment_result': payment_result
+        })
+    
+    except Exception as e:
+        logger.error(f"Withdraw API error: {e}")
+        return jsonify({'ok': False, 'msg': f"Error: {str(e)}"})
 
 @app.route('/api/check_verification')
 def api_check_verification():
+    """Check user verification status"""
     try:
-        uid = request.args.get('user_id')
-        if not uid:
+        user_id = request.args.get('user_id')
+        if not user_id:
             return jsonify({'ok': False, 'msg': 'User ID required'})
         
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        if uid not in users:
+        user = Storage.get_user(user_id)
+        if not user:
             return jsonify({'ok': False, 'msg': 'User not found'})
         
-        user = users[uid]
-        settings = get_settings()
-        status = get_user_status(user, settings)
+        settings = Storage.get_settings()
+        
+        # Determine status
+        if user.get('verified'):
+            needs_device = not settings.get('ignore_device_check', False)
+            device_ok = user.get('device_verified', False) or not needs_device
+            
+            channels_ok = True
+            if settings.get('channels') and not settings.get('disable_channel_verification', False):
+                last_check = user.get('last_channel_check')
+                if last_check:
+                    try:
+                        last_check_time = datetime.fromisoformat(last_check)
+                        if (datetime.now() - last_check_time).total_seconds() < 300:
+                            channels_ok = True
+                        else:
+                            channels_ok = False
+                    except:
+                        channels_ok = False
+                else:
+                    channels_ok = False
+            
+            status = "verified" if device_ok and channels_ok else "pending"
+        else:
+            status = "pending"
         
         return jsonify({
             'ok': True,
@@ -700,639 +1103,822 @@ def api_check_verification():
             'device_verified': user.get('device_verified', False),
             'balance': float(user.get('balance', 0)),
             'name': user.get('name', 'User'),
-            'status': status
+            'status': status,
+            'referred_by': user.get('referred_by')
         })
+    
     except Exception as e:
         logger.error(f"Check verification error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
-@app.route('/api/withdraw', methods=['POST'])
-def api_withdraw():
-    try:
-        data = request.json
-        uid = str(data.get('user_id', ''))
-        try: 
-            amt = float(data.get('amount', 0))
-        except: 
-            return jsonify({'ok': False, 'msg': 'Invalid Amount'})
-        upi = str(data.get('upi', ''))
-        
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        settings = get_settings()
-        
-        if settings.get('withdraw_disabled'):
-            return jsonify({'ok': False, 'msg': '❌ Withdrawals are currently disabled'})
-        
-        if not re.match(r"[\w\.\-_]{2,}@[\w]{2,}", upi):
-            return jsonify({'ok': False, 'msg': '❌ Invalid UPI Format'})
-            
-        min_w = float(settings.get('min_withdrawal', 100))
-        if amt < min_w:
-            return jsonify({'ok': False, 'msg': f'⚠️ Min Withdraw: ₹{min_w}'})
-            
-        cur_bal = float(users.get(uid, {}).get('balance', 0))
-        if cur_bal < amt:
-            return jsonify({'ok': False, 'msg': '❌ Insufficient Balance'})
-        
-        users[uid]['balance'] = cur_bal - amt
-        save_json(USERS_FILE, users)
-        
-        tx_id = generate_code(5)
-        record = {
-            "tx_id": tx_id, 
-            "user_id": uid, 
-            "name": users[uid].get('name', 'User'), 
-            "amount": amt, 
-            "upi": upi, 
-            "status": "pending", 
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-        }
-        
-        is_auto = settings.get('auto_withdraw', False)
-        msg_client = ""
-        
-        if is_auto:
-            record['status'] = 'completed'
-            record['utr'] = f"AUTO-{int(time.time())}"
-            msg_client = f"✅ PAID! UTR: {record['utr']}"
-            safe_send_message(uid, f"✅ *Auto-Withdrawal Paid!*\nAmt: ₹{amt}\nUTR: `{record['utr']}`\nTxID: `{tx_id}`")
-        else:
-            msg_client = "✅ Request Sent! Waiting for Admin..."
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("Open Admin Panel", url=f"{BASE_URL}/admin_panel?user_id={ADMIN_ID}"))
-            
-            msg_adm = f"💸 *New Withdrawal*\nUser: {users[uid]['name']}\nAmt: ₹{amt}\nTxID: `{tx_id}`"
-            safe_send_message(ADMIN_ID, msg_adm, reply_markup=markup)
-            for adm in settings.get('admins', []):
-                safe_send_message(adm, msg_adm, reply_markup=markup)
-
-        w_list = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-        w_list.append(record)
-        save_json(WITHDRAWALS_FILE, w_list)
-        
-        return jsonify({
-            'ok': True, 
-            'msg': msg_client, 
-            'auto': is_auto, 
-            'utr': record.get('utr', ''), 
-            'tx_id': tx_id,
-            'new_balance': users[uid]['balance']
-        })
-        
-    except Exception as e:
-        logger.error(f"Withdraw Error: {e}")
-        return jsonify({'ok': False, 'msg': f"Error: {str(e)}"})
-
 @app.route('/api/get_balance')
 def api_get_balance():
+    """Get user balance"""
     try:
-        uid = request.args.get('user_id')
-        if not uid:
+        user_id = request.args.get('user_id')
+        if not user_id:
             return jsonify({'ok': False, 'msg': 'User ID required'})
         
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        user = users.get(str(uid), {})
+        user = Storage.get_user(user_id)
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'})
         
         return jsonify({
             'ok': True,
             'balance': float(user.get('balance', 0)),
             'verified': user.get('verified', False)
         })
+    
     except Exception as e:
         logger.error(f"Get balance error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
 @app.route('/api/history')
 def api_history():
+    """Get user transaction history"""
     try:
-        uid = request.args.get('user_id')
-        if not uid:
+        user_id = request.args.get('user_id')
+        if not user_id:
             return jsonify([])
         
-        history = [w for w in load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals') if w.get('user_id') == uid]
-        return jsonify(history[::-1][:10])
+        withdrawals = Storage.get_withdrawals(user_id=user_id, limit=20)
+        return jsonify(withdrawals)
+    
     except Exception as e:
         logger.error(f"History error: {e}")
         return jsonify([])
 
-@app.route('/api/contact_upload', methods=['POST'])
-def api_contact():
-    try:
-        uid = request.form.get('user_id')
-        msg = request.form.get('msg', '')
-        f = request.files.get('image')
-        
-        if not uid:
-            return jsonify({'ok': False, 'msg': 'User ID required'})
-            
-        cap = f"📩 *Message from {uid}*\n{msg}"
-        recipients = [ADMIN_ID] + get_settings().get('admins', [])
-        
-        if f:
-            filename = secure_filename(f.filename)
-            path = os.path.join(UPLOAD_FOLDER, filename)
-            f.save(path)
-            
-            with open(path, 'rb') as img:
-                file_data = img.read()
-                for adm in recipients:
-                    try: 
-                        bot.send_photo(adm, file_data, caption=cap, parse_mode="Markdown")
-                    except Exception as e:
-                        logger.error(f"Send photo error to {adm}: {e}")
-            os.remove(path)
-        else:
-            for adm in recipients:
-                safe_send_message(adm, cap)
-                
-        return jsonify({'ok': True})
-    except Exception as e:
-        logger.error(f"Contact error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/api/claim_gift', methods=['POST'])
-def api_claim_gift():
-    try:
-        data = request.json
-        uid = str(data.get('user_id', ''))
-        code = str(data.get('code', '')).strip().upper()
-        
-        if not uid:
-            return jsonify({'ok': False, 'msg': 'User ID required'})
-        
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        if uid not in users:
-            return jsonify({'ok': False, 'msg': 'User not found'})
-        
-        if 'claimed_gifts' not in users[uid]:
-            users[uid]['claimed_gifts'] = []
-        
-        if code in users[uid]['claimed_gifts']:
-            return jsonify({'ok': False, 'msg': 'Already claimed this code'})
-        
-        gifts = check_gift_code_expiry()
-        
-        for gift in gifts:
-            if gift.get('code') == code:
-                if gift.get('expired'):
-                    return jsonify({'ok': False, 'msg': '❌ Gift code expired'})
-                if not gift.get('is_active', True):
-                    return jsonify({'ok': False, 'msg': 'Code is inactive'})
-                
-                if len(gift.get('used_by', [])) >= gift.get('total_uses', 1):
-                    return jsonify({'ok': False, 'msg': 'Code usage limit reached'})
-                
-                amount = random.uniform(
-                    float(gift.get('min_amount', 10)),
-                    float(gift.get('max_amount', 50))
-                )
-                amount = round(amount, 2)
-                
-                users[uid]['balance'] = float(users[uid].get('balance', 0)) + amount
-                users[uid]['claimed_gifts'].append(code)
-                
-                if 'used_by' not in gift:
-                    gift['used_by'] = []
-                gift['used_by'].append(uid)
-                
-                w_list = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-                w_list.append({
-                    "tx_id": f"GIFT-{generate_code(5)}",
-                    "user_id": uid,
-                    "name": "Gift Code Reward",
-                    "amount": amount,
-                    "upi": "-",
-                    "status": "completed",
-                    "date": datetime.now().strftime("%Y-%m-%d %H:%M")
-                })
-                
-                save_json(USERS_FILE, users)
-                save_json(GIFTS_FILE, gifts)
-                save_json(WITHDRAWALS_FILE, w_list)
-                
-                return jsonify({
-                    'ok': True, 
-                    'msg': f'🎉 Gift code claimed! ₹{amount} added to your balance',
-                    'amount': amount,
-                    'new_balance': users[uid]['balance']
-                })
-        
-        return jsonify({'ok': False, 'msg': 'Invalid gift code'})
-    except Exception as e:
-        logger.error(f"Claim gift error: {e}")
-        return jsonify({'ok': False, 'msg': f'Error: {str(e)}'})
-
 @app.route('/api/get_refer_info')
 def api_get_refer_info():
+    """Get referral information"""
     try:
-        uid = request.args.get('user_id')
-        if not uid:
+        user_id = request.args.get('user_id')
+        if not user_id:
             return jsonify({'ok': False, 'msg': 'User ID required'})
         
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        settings = get_settings()
-        
-        if uid not in users:
+        user = Storage.get_user(user_id)
+        if not user:
             return jsonify({'ok': False, 'msg': 'User not found'})
         
-        user = users[uid]
-        
+        # Ensure user has refer code
         if not user.get('refer_code'):
             user['refer_code'] = generate_refer_code()
-            save_json(USERS_FILE, users)
+            Storage.save_user(user)
         
-        refer_code = user.get('refer_code', '')
+        refer_code = user.get('refer_code')
         
+        # Get bot username
         try:
             bot_username = bot.get_me().username
         except:
-            bot_username = "telegram_bot"
+            bot_username = "bot"
         
+        refer_link = f"https://t.me/{bot_username}?start={refer_code}"
+        
+        # Get referred users details
         referred_users = user.get('referred_users', [])
         referred_details = []
-        total_pending = 0
-        total_verified = 0
+        verified_count = 0
+        pending_count = 0
         
-        for ref_uid in referred_users[:20]:
-            if ref_uid in users:
-                ref_user = users[ref_uid]
-                ref_status = get_user_status(ref_user, settings)
-                is_verified = ref_status == "verified"
-                status = "✅ VERIFIED" if is_verified else "⏳ PENDING"
-                
+        for ref_id in referred_users:
+            ref_user = Storage.get_user(ref_id)
+            if ref_user:
+                is_verified = ref_user.get('verified', False)
                 if is_verified:
-                    total_verified += 1
+                    verified_count += 1
                 else:
-                    total_pending += 1
-                    
+                    pending_count += 1
+                
                 referred_details.append({
-                    'id': ref_uid,
+                    'id': ref_id,
                     'name': ref_user.get('name', 'Unknown'),
                     'username': ref_user.get('username', ''),
-                    'status': status,
                     'verified': is_verified,
-                    'status_type': ref_status
+                    'joined': ref_user.get('joined_date', '')
                 })
         
         return jsonify({
             'ok': True,
             'refer_code': refer_code,
-            'refer_link': f'https://t.me/{bot_username}?start={refer_code}',
+            'refer_link': refer_link,
             'referred_users': referred_details,
             'total_refers': len(referred_users),
-            'verified_refers': total_verified,
-            'pending_refers': total_pending
+            'verified_refers': verified_count,
+            'pending_refers': pending_count
         })
+    
     except Exception as e:
         logger.error(f"Refer info error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
-@app.route('/api/leaderboard')
-def api_leaderboard():
+@app.route('/api/claim_gift', methods=['POST'])
+def api_claim_gift():
+    """Claim gift code"""
     try:
-        data = update_leaderboard()
-        return jsonify(data)
-    except Exception as e:
-        logger.error(f"Leaderboard error: {e}")
-        return jsonify({"last_updated": datetime.now().isoformat(), "data": []})
-
-# ==================== 7. ADMIN PANEL ====================
-@app.route('/admin_panel')
-def admin_panel():
-    try:
-        uid = request.args.get('user_id')
-        if not uid or not is_admin(uid): 
-            return "⛔ Unauthorized"
-        
-        all_withdrawals = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-        filtered_withdrawals = []
-        for w in all_withdrawals:
-            tx_id = w.get('tx_id', '')
-            if tx_id != "BONUS" and not tx_id.startswith('REF-') and not tx_id.startswith('GIFT-'):
-                filtered_withdrawals.append(w)
-        
-        gifts = check_gift_code_expiry()
-        
-        current_time = datetime.now()
-        for gift in gifts:
-            if 'expiry' in gift:
-                try:
-                    expiry_time = datetime.fromisoformat(gift['expiry'])
-                    remaining_minutes = max(0, int((expiry_time - current_time).total_seconds() / 60))
-                    gift['remaining_minutes'] = remaining_minutes
-                except:
-                    gift['remaining_minutes'] = 0
-        
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        settings = get_settings()
-        
-        user_list = []
-        for user_id, user_data in users.items():
-            status = get_user_status(user_data, settings)
-            user_list.append({
-                'id': user_id,
-                'name': user_data.get('name', 'Unknown'),
-                'username': user_data.get('username', ''),
-                'balance': float(user_data.get('balance', 0)),
-                'refer_code': user_data.get('refer_code', 'N/A'),
-                'verified': user_data.get('verified', False),
-                'device_verified': user_data.get('device_verified', False),
-                'status': status,
-                'refer_count': len(user_data.get('referred_users', [])),
-                'joined_date': user_data.get('joined_date', '')
-            })
-        
-        return render_template_string(ADMIN_TEMPLATE, 
-            settings=get_settings(), 
-            users=user_list,
-            withdrawals=filtered_withdrawals[::-1], 
-            stats={
-                "total_users": len(users), 
-                "pending_count": len([w for w in filtered_withdrawals if w.get('status') == 'pending'])
-            },
-            timestamp=int(time.time()),
-            admin_id=uid,
-            gifts=gifts,
-            now=current_time
-        )
-    except Exception as e:
-        logger.error(f"Admin panel error: {e}")
-        return f"Internal Server Error: {str(e)}", 500
-
-@app.route('/admin/update_basic', methods=['POST'])
-def admin_update_basic():
-    try:
-        s = get_settings()
-        d = request.json
-        
-        try:
-            s['min_withdrawal'] = float(d.get('min_withdrawal', 100))
-            s['welcome_bonus'] = float(d.get('welcome_bonus', 50))
-            s['min_refer_reward'] = float(d.get('min_refer_reward', 10))
-            s['max_refer_reward'] = float(d.get('max_refer_reward', 50))
-            s['app_name'] = d.get('app_name', 'Cyber Earn')
-        except:
-            pass
-        
-        for k in ['bot_name','bots_disabled','auto_withdraw','ignore_device_check','withdraw_disabled','disable_channel_verification','auto_accept_private','hide_verify_button']:
-            if k in d:
-                s[k] = d[k]
-        
-        save_json(SETTINGS_FILE, s)
-        return jsonify({'ok': True})
-    except Exception as e:
-        logger.error(f"Update basic error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/admin/manage_admins', methods=['POST'])
-def admin_manage_admins():
-    try:
-        d = request.json
-        s = get_settings()
-        if 'admins' not in s: 
-            s['admins'] = []
-        
-        tid = str(d.get('id', '')).strip()
-        action = d.get('action', '')
-        
-        if action == 'add':
-            if tid and tid != str(ADMIN_ID) and tid not in s['admins']:
-                s['admins'].append(tid)
-        elif action == 'remove':
-            if tid in s['admins']:
-                s['admins'].remove(tid)
-                
-        save_json(SETTINGS_FILE, s)
-        return jsonify({'ok': True})
-    except Exception as e:
-        logger.error(f"Manage admins error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/admin/channels', methods=['POST'])
-def admin_channels():
-    try:
-        d = request.json
-        s = get_settings()
-        action = d.get('action', '')
-        
-        if action == 'add':
-            s['channels'].append({
-                "btn_name": d.get('name', 'Channel'),
-                "link": d.get('link', '#'),
-                "id": d.get('id', ''),
-                "disabled": False
-            })
-        elif action == 'delete':
-            index = int(d.get('index', 0))
-            if 0 <= index < len(s['channels']):
-                del s['channels'][index]
-        elif action == 'toggle':
-            index = int(d.get('index', 0))
-            if 0 <= index < len(s['channels']):
-                s['channels'][index]['disabled'] = not s['channels'][index].get('disabled', False)
-        
-        save_json(SETTINGS_FILE, s)
-        return jsonify({'ok': True})
-    except Exception as e:
-        logger.error(f"Channels error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/admin/process_withdraw', methods=['POST'])
-def admin_process_withdraw():
-    try:
-        d = request.json
-        w_list = load_json_cached(WITHDRAWALS_FILE, [], 'withdrawals')
-        
-        for w in w_list:
-            if w.get('tx_id') == d.get('tx_id') and w.get('status') == 'pending':
-                w['status'] = d.get('status', '')
-                w['utr'] = d.get('utr', '')
-                
-                if d.get('status') == 'completed': 
-                    safe_send_message(w['user_id'], f"✅ *Withdrawal Paid!*\nAmt: ₹{w['amount']}\nUTR: `{w['utr']}`\nTxID: `{w['tx_id']}`")
-                else:
-                    users = load_json_cached(USERS_FILE, {}, 'users')
-                    if w['user_id'] in users:
-                        users[w['user_id']]['balance'] = float(users[w['user_id']].get('balance', 0)) + float(w['amount'])
-                        save_json(USERS_FILE, users)
-                        safe_send_message(w['user_id'], f"❌ *Withdrawal Rejected*\nAmt: ₹{w['amount']}\nRefunded to balance.\nTxID: `{w['tx_id']}`")
-                break
-                
-        save_json(WITHDRAWALS_FILE, w_list)
-        return jsonify({'ok': True})
-    except Exception as e:
-        logger.error(f"Process withdraw error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/admin/upload_logo', methods=['POST'])
-def admin_logo():
-    try:
-        if 'logo' in request.files:
-            f = request.files['logo']
-            f.save(os.path.join(STATIC_DIR, "logo_custom.png"))
-            s = get_settings()
-            s['logo_filename'] = "logo_custom.png"
-            save_json(SETTINGS_FILE, s)
-            return jsonify({'ok': True})
-        return jsonify({'ok': False, 'msg': 'No file uploaded'})
-    except Exception as e:
-        logger.error(f"Upload logo error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/admin/broadcast', methods=['POST'])
-def admin_broadcast():
-    try:
-        txt = request.form.get('text', '')
-        f = request.files.get('image')
-        users = load_json_cached(USERS_FILE, {}, 'users')
-        cnt = 0
-        
-        if f:
-            filename = secure_filename(f.filename)
-            path = os.path.join(UPLOAD_FOLDER, filename)
-            f.save(path)
-            
-            with open(path, 'rb') as img:
-                idata = img.read()
-                for u in users:
-                    try: 
-                        bot.send_photo(u, idata, caption=txt)
-                        cnt += 1
-                    except: 
-                        pass
-            os.remove(path)
-        else:
-            for u in users:
-                try: 
-                    bot.send_message(u, txt)
-                    cnt += 1
-                except: 
-                    pass
-        return jsonify({'count': cnt})
-    except Exception as e:
-        logger.error(f"Broadcast error: {e}")
-        return jsonify({'ok': False, 'msg': str(e)})
-
-@app.route('/admin/send_to_user', methods=['POST'])
-def admin_send_to_user():
-    try:
-        user_id = request.form.get('user_id')
-        txt = request.form.get('text', '')
-        f = request.files.get('image')
+        data = request.json
+        user_id = str(data.get('user_id'))
+        code = str(data.get('code', '')).upper().strip()
         
         if not user_id:
             return jsonify({'ok': False, 'msg': 'User ID required'})
         
-        if f:
-            filename = secure_filename(f.filename)
-            path = os.path.join(UPLOAD_FOLDER, filename)
-            f.save(path)
-            
-            with open(path, 'rb') as img:
-                idata = img.read()
-                try: 
-                    bot.send_photo(user_id, idata, caption=txt)
-                    os.remove(path)
-                    return jsonify({'ok': True, 'msg': 'Message sent successfully!'})
-                except Exception as e:
-                    os.remove(path)
-                    return jsonify({'ok': False, 'msg': f'Error: {str(e)}'})
-        else:
-            try: 
-                bot.send_message(user_id, txt)
-                return jsonify({'ok': True, 'msg': 'Message sent successfully!'})
-            except Exception as e:
-                return jsonify({'ok': False, 'msg': f'Error: {str(e)}'})
+        if not code or len(code) != 5:
+            return jsonify({'ok': False, 'msg': 'Invalid gift code'})
+        
+        user = Storage.get_user(user_id)
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'})
+        
+        gift = Storage.get_gift_code(code)
+        if not gift:
+            return jsonify({'ok': False, 'msg': 'Invalid gift code'})
+        
+        # Check if expired
+        if gift.get('expired'):
+            return jsonify({'ok': False, 'msg': 'Gift code has expired'})
+        
+        # Check if active
+        if not gift.get('is_active', True):
+            return jsonify({'ok': False, 'msg': 'Gift code is inactive'})
+        
+        # Check expiry date
+        if gift.get('expiry'):
+            try:
+                expiry = datetime.fromisoformat(gift['expiry'])
+                if expiry < datetime.now():
+                    gift['expired'] = True
+                    Storage.update_gift_code(code, {'expired': True})
+                    return jsonify({'ok': False, 'msg': 'Gift code has expired'})
+            except:
+                pass
+        
+        # Check usage limit
+        used_by = gift.get('used_by', [])
+        if len(used_by) >= gift.get('total_uses', 1):
+            return jsonify({'ok': False, 'msg': 'Gift code usage limit reached'})
+        
+        # Check if user already claimed
+        if user_id in used_by:
+            return jsonify({'ok': False, 'msg': 'You have already claimed this code'})
+        
+        # Calculate reward
+        min_amount = float(gift.get('min_amount', 10))
+        max_amount = float(gift.get('max_amount', 50))
+        amount = round(random.uniform(min_amount, max_amount), 2)
+        
+        # Add to user balance
+        user['balance'] = float(user.get('balance', 0)) + amount
+        user.setdefault('claimed_gifts', []).append(code)
+        Storage.save_user(user)
+        
+        # Update gift code
+        used_by.append(user_id)
+        Storage.update_gift_code(code, {
+            'used_by': used_by,
+            'last_claimed': datetime.now().isoformat()
+        })
+        
+        # Create transaction record
+        tx_id = generate_tx_id()
+        withdrawal_data = {
+            "tx_id": tx_id,
+            "user_id": user_id,
+            "name": "Gift Code Reward",
+            "amount": amount,
+            "status": "completed",
+            "type": "gift",
+            "gift_code": code,
+            "created_at": datetime.now().isoformat()
+        }
+        Storage.create_withdrawal(withdrawal_data)
+        
+        return jsonify({
+            'ok': True,
+            'msg': f'🎉 Congratulations! You got ₹{amount}!',
+            'amount': amount,
+            'new_balance': user['balance']
+        })
+    
     except Exception as e:
-        logger.error(f"Send to user error: {e}")
+        logger.error(f"Claim gift error: {e}")
+        return jsonify({'ok': False, 'msg': f'Error: {str(e)}'})
+
+@app.route('/api/leaderboard')
+def api_leaderboard():
+    """Get leaderboard data"""
+    try:
+        all_users = Storage.get_all_users()
+        leaderboard = []
+        
+        for user in all_users:
+            leaderboard.append({
+                'user_id': user.get('user_id'),
+                'name': user.get('name', 'User'),
+                'balance': float(user.get('balance', 0)),
+                'total_refers': len(user.get('referred_users', [])),
+                'verified': user.get('verified', False)
+            })
+        
+        leaderboard.sort(key=lambda x: x['balance'], reverse=True)
+        
+        return jsonify({
+            'last_updated': datetime.now().isoformat(),
+            'data': leaderboard[:20]
+        })
+    
+    except Exception as e:
+        logger.error(f"Leaderboard error: {e}")
+        return jsonify({'last_updated': datetime.now().isoformat(), 'data': []})
+
+@app.route('/api/contact', methods=['POST'])
+def api_contact():
+    """Contact admin"""
+    try:
+        user_id = request.form.get('user_id')
+        message = request.form.get('message', '')
+        image = request.files.get('image')
+        
+        if not user_id or not message:
+            return jsonify({'ok': False, 'msg': 'User ID and message required'})
+        
+        user = Storage.get_user(user_id)
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'})
+        
+        # Send to all admins
+        caption = f"📩 *Message from {user['name']}*\nID: `{user_id}`\n\n{message}"
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                if image:
+                    # Read image data
+                    image_data = image.read()
+                    image.seek(0)  # Reset for next admin
+                    
+                    # Create a new file-like object for each admin
+                    from io import BytesIO
+                    bio = BytesIO(image_data)
+                    bio.name = image.filename
+                    
+                    bot.send_photo(admin_id, bio, caption=caption, parse_mode="Markdown")
+                else:
+                    safe_send_message(admin_id, caption)
+            except Exception as e:
+                logger.error(f"Send to admin {admin_id} error: {e}")
+        
+        return jsonify({'ok': True, 'msg': 'Message sent to admin'})
+    
+    except Exception as e:
+        logger.error(f"Contact error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+# ==================== ADMIN API ROUTES ====================
+@app.route('/admin_panel')
+def admin_panel():
+    """Admin panel interface"""
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id or not is_admin(user_id):
+            return "Unauthorized", 403
+        
+        settings = Storage.get_settings()
+        users = Storage.get_all_users()
+        withdrawals = Storage.get_withdrawals()
+        gifts = Storage.get_all_gift_codes()
+        
+        # Get pending withdrawals
+        pending_withdrawals = [w for w in withdrawals if w.get('status') == 'pending']
+        
+        # Calculate stats
+        total_users = len(users)
+        total_balance = sum(float(u.get('balance', 0)) for u in users)
+        total_withdrawn = sum(float(w.get('amount', 0)) for w in withdrawals if w.get('status') == 'completed')
+        
+        # Get UPI balance
+        upi_balance = UPIPayment.check_balance()
+        
+        return render_template_string(ADMIN_TEMPLATE,
+            settings=settings,
+            users=users,
+            withdrawals=withdrawals,
+            pending_withdrawals=pending_withdrawals,
+            gifts=gifts,
+            stats={
+                'total_users': total_users,
+                'total_balance': total_balance,
+                'total_withdrawn': total_withdrawn,
+                'pending_count': len(pending_withdrawals)
+            },
+            upi_balance=upi_balance,
+            admin_id=user_id,
+            timestamp=int(time.time())
+        )
+    
+    except Exception as e:
+        logger.error(f"Admin panel error: {e}")
+        return f"Error: {str(e)}", 500
+
+@app.route('/admin/update_settings', methods=['POST'])
+def admin_update_settings():
+    """Update bot settings"""
+    try:
+        data = request.json
+        settings = Storage.get_settings()
+        
+        # Update basic settings
+        for key in ['bot_name', 'app_name', 'min_withdrawal', 'welcome_bonus', 
+                    'min_refer_reward', 'max_refer_reward']:
+            if key in data:
+                settings[key] = data[key]
+        
+        # Update toggle settings
+        for key in ['bots_disabled', 'auto_withdraw', 'ignore_device_check', 
+                    'withdraw_disabled', 'disable_channel_verification', 
+                    'auto_accept_private', 'hide_verify_button']:
+            if key in data:
+                settings[key] = bool(data[key])
+        
+        Storage.save_settings(settings)
+        return jsonify({'ok': True})
+    
+    except Exception as e:
+        logger.error(f"Update settings error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/update_upi_settings', methods=['POST'])
+def admin_update_upi_settings():
+    """Update UPI payment settings"""
+    try:
+        data = request.json
+        settings = Storage.get_settings()
+        
+        settings['upi_enabled'] = bool(data.get('upi_enabled', False))
+        settings['upi_token'] = data.get('upi_token', '')
+        settings['upi_key'] = data.get('upi_key', '')
+        settings['upi_receiver'] = data.get('upi_receiver', '')
+        settings['upi_mode'] = data.get('upi_mode', 'manual')
+        settings['upi_api_url'] = data.get('upi_api_url', 'https://easepay.site/upiapi.php')
+        
+        Storage.save_settings(settings)
+        return jsonify({'ok': True})
+    
+    except Exception as e:
+        logger.error(f"Update UPI settings error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/check_upi_balance')
+def admin_check_upi_balance():
+    """Check UPI wallet balance"""
+    try:
+        result = UPIPayment.check_balance()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/admin/channels', methods=['POST'])
+def admin_channels():
+    """Manage channels"""
+    try:
+        data = request.json
+        action = data.get('action')
+        settings = Storage.get_settings()
+        
+        if action == 'add':
+            settings['channels'].append({
+                'btn_name': data.get('name', 'Channel'),
+                'link': data.get('link', '#'),
+                'id': data.get('id', ''),
+                'disabled': False
+            })
+        elif action == 'delete':
+            index = int(data.get('index', -1))
+            if 0 <= index < len(settings['channels']):
+                del settings['channels'][index]
+        elif action == 'toggle':
+            index = int(data.get('index', -1))
+            if 0 <= index < len(settings['channels']):
+                settings['channels'][index]['disabled'] = not settings['channels'][index].get('disabled', False)
+        
+        Storage.save_settings(settings)
+        return jsonify({'ok': True})
+    
+    except Exception as e:
+        logger.error(f"Channels error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/process_withdrawal', methods=['POST'])
+def admin_process_withdrawal():
+    """Process withdrawal (approve/reject)"""
+    try:
+        data = request.json
+        tx_id = data.get('tx_id')
+        action = data.get('action')  # approve, reject
+        utr = data.get('utr', '')
+        
+        # Get all withdrawals
+        withdrawals = Storage.get_withdrawals()
+        target_withdrawal = None
+        
+        for w in withdrawals:
+            if w.get('tx_id') == tx_id:
+                target_withdrawal = w
+                break
+        
+        if not target_withdrawal:
+            return jsonify({'ok': False, 'msg': 'Withdrawal not found'})
+        
+        if action == 'approve':
+            # Update withdrawal status
+            target_withdrawal['status'] = 'completed'
+            target_withdrawal['utr'] = utr
+            target_withdrawal['completed_at'] = datetime.now().isoformat()
+            
+            # Update in database
+            Storage.update_withdrawal(tx_id, {
+                'status': 'completed',
+                'utr': utr,
+                'completed_at': datetime.now().isoformat()
+            })
+            
+            # Update user's total withdrawn
+            user = Storage.get_user(target_withdrawal['user_id'])
+            if user:
+                user['total_withdrawn'] = float(user.get('total_withdrawn', 0)) + float(target_withdrawal['amount'])
+                Storage.save_user(user)
+            
+            # Notify user
+            safe_send_message(
+                target_withdrawal['user_id'],
+                f"✅ *Withdrawal Approved!*\n\nAmount: ₹{target_withdrawal['amount']}\nUTR: `{utr}`\nTxID: `{tx_id}`"
+            )
+        
+        elif action == 'reject':
+            # Refund amount to user
+            user = Storage.get_user(target_withdrawal['user_id'])
+            if user:
+                user['balance'] = float(user.get('balance', 0)) + float(target_withdrawal['amount'])
+                Storage.save_user(user)
+            
+            # Update withdrawal status
+            target_withdrawal['status'] = 'rejected'
+            target_withdrawal['rejected_at'] = datetime.now().isoformat()
+            
+            Storage.update_withdrawal(tx_id, {
+                'status': 'rejected',
+                'rejected_at': datetime.now().isoformat()
+            })
+            
+            # Notify user
+            safe_send_message(
+                target_withdrawal['user_id'],
+                f"❌ *Withdrawal Rejected*\n\nAmount: ₹{target_withdrawal['amount']} has been refunded to your balance.\nTxID: `{tx_id}`"
+            )
+        
+        return jsonify({'ok': True})
+    
+    except Exception as e:
+        logger.error(f"Process withdrawal error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
 @app.route('/admin/create_gift', methods=['POST'])
 def admin_create_gift():
+    """Create gift code"""
     try:
         data = request.json
-        code = data.get('code', '').strip().upper()
-        auto_gen = data.get('auto_generate', False)
         
-        if auto_gen or not code:
+        # Generate code if auto
+        code = data.get('code', '').upper()
+        if data.get('auto_generate') or not code:
             code = generate_code(5)
-        elif len(code) != 5 or not code.isalnum():
-            return jsonify({'ok': False, 'msg': 'Code must be 5 alphanumeric characters'})
         
-        gifts = load_json_cached(GIFTS_FILE, [], 'gifts')
-        if any(g.get('code') == code for g in gifts):
+        # Check if code exists
+        existing = Storage.get_gift_code(code)
+        if existing:
             return jsonify({'ok': False, 'msg': 'Code already exists'})
         
+        # Calculate expiry
         expiry_hours = int(data.get('expiry_hours', 2))
-        expiry_time = datetime.now() + timedelta(hours=expiry_hours)
+        expiry = datetime.now() + timedelta(hours=expiry_hours)
         
-        gift = {
+        gift_data = {
             'code': code,
             'min_amount': float(data.get('min_amount', 10)),
             'max_amount': float(data.get('max_amount', 50)),
-            'expiry': expiry_time.isoformat(),
+            'expiry': expiry.isoformat(),
             'total_uses': int(data.get('total_uses', 1)),
             'used_by': [],
             'is_active': True,
             'expired': False,
-            'created_at': datetime.now().isoformat(),
-            'created_by': request.args.get('user_id', 'admin')
+            'created_at': datetime.now().isoformat()
         }
         
-        gifts.append(gift)
-        save_json(GIFTS_FILE, gifts)
+        Storage.create_gift_code(gift_data)
         
         return jsonify({'ok': True, 'code': code})
+    
     except Exception as e:
         logger.error(f"Create gift error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
 @app.route('/admin/toggle_gift', methods=['POST'])
 def admin_toggle_gift():
+    """Toggle gift code status"""
     try:
         data = request.json
         code = data.get('code')
-        action = data.get('action')
+        action = data.get('action')  # toggle, delete
         
-        gifts = load_json_cached(GIFTS_FILE, [], 'gifts')
+        gift = Storage.get_gift_code(code)
+        if not gift:
+            return jsonify({'ok': False, 'msg': 'Gift code not found'})
         
-        for gift in gifts:
-            if gift.get('code') == code:
-                if action == 'toggle':
-                    gift['is_active'] = not gift.get('is_active', True)
-                elif action == 'delete':
-                    gifts.remove(gift)
-                break
+        if action == 'toggle':
+            Storage.update_gift_code(code, {'is_active': not gift.get('is_active', True)})
+        elif action == 'delete':
+            Storage.update_gift_code(code, {'expired': True, 'is_active': False})
         
-        save_json(GIFTS_FILE, gifts)
         return jsonify({'ok': True})
+    
     except Exception as e:
         logger.error(f"Toggle gift error: {e}")
         return jsonify({'ok': False, 'msg': str(e)})
 
-# ==================== 8. SETUP ====================
+@app.route('/admin/broadcast', methods=['POST'])
+def admin_broadcast():
+    """Broadcast message to all users"""
+    try:
+        message = request.form.get('message', '')
+        image = request.files.get('image')
+        
+        if not message:
+            return jsonify({'ok': False, 'msg': 'Message required'})
+        
+        users = Storage.get_all_users()
+        sent_count = 0
+        
+        for user in users:
+            try:
+                if image:
+                    # Reset file pointer for each send
+                    image_data = image.read()
+                    image.seek(0)
+                    
+                    from io import BytesIO
+                    bio = BytesIO(image_data)
+                    bio.name = image.filename
+                    
+                    bot.send_photo(user['user_id'], bio, caption=message)
+                else:
+                    bot.send_message(user['user_id'], message)
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"Broadcast to {user['user_id']} error: {e}")
+        
+        return jsonify({'ok': True, 'sent': sent_count, 'total': len(users)})
+    
+    except Exception as e:
+        logger.error(f"Broadcast error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/send_to_user', methods=['POST'])
+def admin_send_to_user():
+    """Send message to specific user"""
+    try:
+        target_user_id = request.form.get('user_id')
+        message = request.form.get('message', '')
+        image = request.files.get('image')
+        
+        if not target_user_id or not message:
+            return jsonify({'ok': False, 'msg': 'User ID and message required'})
+        
+        try:
+            if image:
+                bot.send_photo(target_user_id, image, caption=message)
+            else:
+                bot.send_message(target_user_id, message)
+        except Exception as e:
+            return jsonify({'ok': False, 'msg': f'Failed to send: {str(e)}'})
+        
+        return jsonify({'ok': True})
+    
+    except Exception as e:
+        logger.error(f"Send to user error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+@app.route('/admin/upload_logo', methods=['POST'])
+def admin_upload_logo():
+    """Upload bot logo"""
+    try:
+        if 'logo' not in request.files:
+            return jsonify({'ok': False, 'msg': 'No file uploaded'})
+        
+        file = request.files['logo']
+        if file.filename == '':
+            return jsonify({'ok': False, 'msg': 'No file selected'})
+        
+        # Save file
+        filename = f"logo_{int(time.time())}.png"
+        file.save(os.path.join(STATIC_DIR, filename))
+        
+        # Update settings
+        settings = Storage.get_settings()
+        settings['logo_filename'] = filename
+        Storage.save_settings(settings)
+        
+        return jsonify({'ok': True, 'filename': filename})
+    
+    except Exception as e:
+        logger.error(f"Upload logo error: {e}")
+        return jsonify({'ok': False, 'msg': str(e)})
+
+# ==================== CALLBACK QUERY HANDLERS ====================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Handle callback queries from inline buttons"""
+    try:
+        data = call.data
+        
+        if data.startswith('approve_'):
+            tx_id = data.replace('approve_', '')
+            
+            # Ask for UTR
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("📝 Enter UTR", callback_data=f"utr_{tx_id}"))
+            markup.add(InlineKeyboardButton("❌ Cancel", callback_data=f"cancel"))
+            
+            bot.edit_message_text(
+                f"Please enter UTR for transaction {tx_id}:",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup
+            )
+        
+        elif data.startswith('reject_'):
+            tx_id = data.replace('reject_', '')
+            
+            # Process rejection
+            result = admin_process_withdrawal_internal(tx_id, 'reject')
+            
+            if result['ok']:
+                bot.edit_message_text(
+                    f"✅ Transaction {tx_id} has been rejected and amount refunded.",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            else:
+                bot.edit_message_text(
+                    f"❌ Error: {result['msg']}",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+        
+        elif data.startswith('utr_'):
+            tx_id = data.replace('utr_', '')
+            
+            # Ask user to send UTR as message
+            bot.edit_message_text(
+                f"Please reply to this message with the UTR for {tx_id}:",
+                call.message.chat.id,
+                call.message.message_id
+            )
+            
+            # Store context for next message
+            # This would need session storage in a real implementation
+        
+        elif data == 'cancel':
+            bot.edit_message_text(
+                "Action cancelled.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+    
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+
+# Helper function for internal withdrawal processing
+def admin_process_withdrawal_internal(tx_id, action, utr=''):
+    """Internal function to process withdrawal"""
+    try:
+        withdrawals = Storage.get_withdrawals()
+        target_withdrawal = None
+        
+        for w in withdrawals:
+            if w.get('tx_id') == tx_id:
+                target_withdrawal = w
+                break
+        
+        if not target_withdrawal:
+            return {'ok': False, 'msg': 'Withdrawal not found'}
+        
+        if action == 'approve':
+            # Update withdrawal status
+            target_withdrawal['status'] = 'completed'
+            target_withdrawal['utr'] = utr
+            target_withdrawal['completed_at'] = datetime.now().isoformat()
+            
+            # Update in database
+            Storage.update_withdrawal(tx_id, {
+                'status': 'completed',
+                'utr': utr,
+                'completed_at': datetime.now().isoformat()
+            })
+            
+            # Update user's total withdrawn
+            user = Storage.get_user(target_withdrawal['user_id'])
+            if user:
+                user['total_withdrawn'] = float(user.get('total_withdrawn', 0)) + float(target_withdrawal['amount'])
+                Storage.save_user(user)
+            
+            # Notify user
+            safe_send_message(
+                target_withdrawal['user_id'],
+                f"✅ *Withdrawal Approved!*\n\nAmount: ₹{target_withdrawal['amount']}\nUTR: `{utr}`\nTxID: `{tx_id}`"
+            )
+            
+            return {'ok': True}
+        
+        elif action == 'reject':
+            # Refund amount to user
+            user = Storage.get_user(target_withdrawal['user_id'])
+            if user:
+                user['balance'] = float(user.get('balance', 0)) + float(target_withdrawal['amount'])
+                Storage.save_user(user)
+            
+            # Update withdrawal status
+            target_withdrawal['status'] = 'rejected'
+            target_withdrawal['rejected_at'] = datetime.now().isoformat()
+            
+            Storage.update_withdrawal(tx_id, {
+                'status': 'rejected',
+                'rejected_at': datetime.now().isoformat()
+            })
+            
+            # Notify user
+            safe_send_message(
+                target_withdrawal['user_id'],
+                f"❌ *Withdrawal Rejected*\n\nAmount: ₹{target_withdrawal['amount']} has been refunded to your balance.\nTxID: `{tx_id}`"
+            )
+            
+            return {'ok': True}
+        
+        return {'ok': False, 'msg': 'Invalid action'}
+    
+    except Exception as e:
+        logger.error(f"Process withdrawal internal error: {e}")
+        return {'ok': False, 'msg': str(e)}
+
+# ==================== STATIC FILES ====================
 @app.route('/static/<path:filename>')
-def serve_static(filename): 
+def serve_static(filename):
+    """Serve static files"""
     return send_from_directory(STATIC_DIR, filename)
 
-@app.route('/setup_webhooks')
-def setup_webhooks():
+@app.route('/get_pfp')
+def get_pfp():
+    """Get user profile photo"""
     try:
+        user_id = request.args.get('uid')
+        if not user_id:
+            return "No user ID", 400
+        
+        photos = bot.get_user_profile_photos(user_id)
+        if photos.total_count > 0:
+            file_id = photos.photos[0][-1].file_id
+            file_info = bot.get_file(file_id)
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+            
+            response = requests.get(file_url, timeout=5)
+            return Response(response.content, mimetype='image/jpeg')
+        
+        return "No photo", 404
+    
+    except Exception as e:
+        logger.error(f"PFP error: {e}")
+        return "Error", 500
+
+# ==================== WEBHOOK SETUP ====================
+@app.route('/setup_webhook')
+def setup_webhook():
+    """Setup telegram webhook"""
+    try:
+        webhook_url = f"{BASE_URL}/webhook"
         bot.remove_webhook()
         time.sleep(1)
-        bot.set_webhook(f"{BASE_URL}/webhook/main")
-        return "✅ Webhook Configured"
+        bot.set_webhook(url=webhook_url)
+        return f"✅ Webhook set to {webhook_url}"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"❌ Error: {str(e)}"
 
-@app.route('/webhook/main', methods=['POST'])
-def wm():
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Telegram webhook handler"""
     if request.headers.get('content-type') == 'application/json':
         try:
             json_string = request.get_data().decode('utf-8')
             update = telebot.types.Update.de_json(json_string)
             bot.process_new_updates([update])
-            return ''
+            return 'OK', 200
         except Exception as e:
             logger.error(f"Webhook error: {e}")
             return 'Error', 500
@@ -1340,945 +1926,1855 @@ def wm():
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'mongo': mongo.is_connected(),
+        'bot': 'running'
+    })
 
-# ==================== 9. HTML TEMPLATES ====================
 
 MINI_APP_TEMPLATE = """
+<!-- MINI_APP_TEMPLATE - Complete Modern User Interface -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>{{ settings.app_name }}</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=Poppins:wght@400;600;700&family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <style>
-        :root { 
-            --bg: #050508; 
-            --cyan: #00f3ff; 
-            --gold: #ffd700; 
-            --panel: rgba(255,255,255,0.05); 
-            --neon-pink: #ff00ff;
-            --neon-blue: #00ccff;
-            --neon-green: #00ffaa;
-            --neon-purple: #9d4edd;
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: radial-gradient(circle at top, #111122, var(--bg)); color: white; font-family: 'Poppins', sans-serif; margin: 0; padding: 0; min-height: 100vh; overflow-x: hidden; }
-        .hidden { display: none !important; }
-        .header { display: flex; align-items: center; justify-content: center; gap: 20px; margin: 20px 0; width: 100%; padding: 0 5%; animation: fadeInDown 0.8s ease-out; }
-        @keyframes fadeInDown { from { opacity: 0; transform: translateY(-30px); } to { opacity: 1; transform: translateY(0); } }
-        .logo { width: 70px; height: 70px; border-radius: 50%; border: 3px solid var(--cyan); box-shadow: 0 0 25px rgba(0,243,255,0.7), inset 0 0 15px rgba(0,243,255,0.3); object-fit: cover; animation: pulseLogo 3s infinite alternate; }
-        @keyframes pulseLogo { 0% { box-shadow: 0 0 25px rgba(0,243,255,0.7), inset 0 0 15px rgba(0,243,255,0.3); } 100% { box-shadow: 0 0 40px rgba(0,243,255,0.9), inset 0 0 20px rgba(0,243,255,0.5); } }
-        .title { font-size: 26px; font-weight: 800; text-shadow: 0 0 15px var(--cyan), 0 0 30px rgba(0,243,255,0.5); letter-spacing: 2px; font-family: 'Orbitron', monospace; background: linear-gradient(45deg, var(--cyan), var(--neon-blue)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: textGlow 2s infinite alternate; }
-        @keyframes textGlow { from { text-shadow: 0 0 15px var(--cyan), 0 0 30px rgba(0,243,255,0.5); } to { text-shadow: 0 0 20px var(--cyan), 0 0 40px rgba(0,243,255,0.7), 0 0 60px rgba(0,243,255,0.3); } }
-        .nav-bar { display: flex; width: 100%; max-width: 550px; background: rgba(0,0,0,0.8); border-radius: 20px; margin: 15px auto; padding: 8px; justify-content: space-around; border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(10px); animation: slideUp 0.6s ease-out; }
-        @keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
-        .nav-btn { background: transparent; border: none; color: #aaa; padding: 12px 5px; border-radius: 15px; font-weight: bold; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); width: 25%; position: relative; overflow: hidden; }
-        .nav-btn i { font-size: 24px; transition: all 0.3s; }
-        .nav-text { font-size: 11px; margin-top: 3px; color: #888; transition: all 0.3s; font-family: 'Rajdhani', sans-serif; }
-        .nav-btn::before { content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent); transition: left 0.7s; }
-        .nav-btn:hover::before { left: 100%; }
-        .nav-btn.active { background: linear-gradient(135deg, rgba(0,243,255,0.2), rgba(0,136,255,0.2)); color: var(--cyan); box-shadow: 0 0 20px rgba(0,243,255,0.5), inset 0 1px 0 rgba(255,255,255,0.2); border: 1px solid rgba(0,243,255,0.3); transform: translateY(-3px); }
-        .nav-btn.active .nav-text { color: var(--cyan); text-shadow: 0 0 10px rgba(0,243,255,0.5); }
-        .nav-btn.active i { transform: scale(1.2); filter: drop-shadow(0 0 8px rgba(0,243,255,0.7)); }
-        .tab-content { width: 100%; max-width: 550px; padding: 0 5% 30px 5%; animation: fadeIn 0.5s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .card-metal, .card-gold, .card-silver, .card-purple { width: 100%; border-radius: 20px; padding: 30px; margin-bottom: 25px; position: relative; overflow: hidden; animation: cardAppear 0.6s ease-out; }
-        @keyframes cardAppear { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
-        .card-metal { background: linear-gradient(135deg, #e0e0e0 0%, #bdc3c7 20%, #88929e 50%, #bdc3c7 80%, #e0e0e0 100%); border: 2px solid #fff; box-shadow: 0 15px 30px rgba(0,0,0,0.6), inset 0 0 20px rgba(255,255,255,0.7); display: flex; align-items: center; color: #222; animation: metalShine 4s infinite; }
-        @keyframes metalShine { 0%, 100% { background: linear-gradient(135deg, #e0e0e0 0%, #bdc3c7 20%, #88929e 50%, #bdc3c7 80%, #e0e0e0 100%); } 50% { background: linear-gradient(135deg, #f0f0f0 0%, #d0d0d0 20%, #a0a0a0 50%, #d0d0d0 80%, #f0f0f0 100%); } }
-        .card-metal::before { content: ''; position: absolute; top: 0; left: -150%; width: 60%; height: 100%; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.9), transparent); animation: shine 3.5s infinite; transform: skewX(-20deg); }
-        @keyframes shine { 100% { left: 200%; } }
-        .p-pic-wrapper { position: relative; width: 80px; height: 80px; margin-right: 20px; z-index: 2; flex-shrink: 0; }
-        .p-pic { width: 100%; height: 100%; border-radius: 50%; border: 4px solid #333; object-fit: cover; box-shadow: 0 5px 15px rgba(0,0,0,0.5); transition: transform 0.5s; }
-        .p-pic:hover { transform: rotate(15deg) scale(1.05); }
-        .p-icon { display: none; width: 100%; height: 100%; border-radius: 50%; border: 4px solid #333; background: linear-gradient(135deg, #ddd, #aaa); align-items: center; justify-content: center; font-size: 32px; color: #333; }
-        .card-gold { background: radial-gradient(ellipse at center, #ffd700 0%, #d4af37 40%, #b8860b 100%); text-align: center; color: #2e2003; border: 3px solid #fff2ad; box-shadow: 0 0 35px rgba(255, 215, 0, 0.6), inset 0 0 15px rgba(255, 255, 255, 0.6); animation: pulseGold 3s infinite alternate, floatCard 6s infinite ease-in-out; position: relative; }
-        @keyframes pulseGold { 0% { box-shadow: 0 0 35px rgba(255,215,0,0.6), inset 0 0 15px rgba(255,255,255,0.6); } 100% { box-shadow: 0 0 50px rgba(255,215,0,0.8), inset 0 0 25px rgba(255,255,255,0.8); } }
-        @keyframes floatCard { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
-        .card-gold::after { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(255,255,255,0.4) 0%, transparent 70%); transform: rotate(30deg); pointer-events: none; animation: rotateLight 20s linear infinite; }
-        @keyframes rotateLight { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        .glass-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); backdrop-filter: blur(10px); display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 20px; z-index: 10; animation: overlayAppear 0.5s ease-out; }
-        @keyframes overlayAppear { from { opacity: 0; backdrop-filter: blur(0); } to { opacity: 1; backdrop-filter: blur(10px); } }
-        .unlock-btn { background: linear-gradient(135deg, var(--neon-pink), var(--neon-purple), var(--neon-blue)); color: white; border: none; padding: 18px 40px; border-radius: 35px; font-weight: 800; font-size: 18px; cursor: pointer; display: inline-flex; align-items: center; gap: 12px; font-family: 'Orbitron', monospace; box-shadow: 0 8px 25px rgba(0,243,255,0.5), inset 0 1px 0 rgba(255,255,255,0.3); margin-top: 20px; position: relative; overflow: hidden; transition: all 0.3s; animation: buttonPulse 2s infinite; }
-        @keyframes buttonPulse { 0%, 100% { box-shadow: 0 8px 25px rgba(0,243,255,0.5), inset 0 1px 0 rgba(255,255,255,0.3); } 50% { box-shadow: 0 8px 35px rgba(0,243,255,0.7), inset 0 1px 0 rgba(255,255,255,0.5); } }
-        .unlock-btn::before { content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent); transition: left 0.7s; }
-        .unlock-btn:hover::before { left: 100%; }
-        .unlock-btn:active { transform: scale(0.95); animation: none; }
-        .card-silver { background: linear-gradient(135deg, #c0c0c0 0%, #d0d0d0 30%, #e0e0e0 50%, #d0d0d0 70%, #c0c0c0 100%); border: 2px solid #fff; box-shadow: 0 15px 30px rgba(0,0,0,0.4); color: #222; text-align: center; aspect-ratio: 16/9; display: flex; flex-direction: column; justify-content: center; align-items: center; animation: silverShimmer 3s infinite alternate; }
-        @keyframes silverShimmer { from { background: linear-gradient(135deg, #c0c0c0 0%, #d0d0d0 30%, #e0e0e0 50%, #d0d0d0 70%, #c0c0c0 100%); } to { background: linear-gradient(135deg, #d0d0d0 0%, #e0e0e0 30%, #f0f0f0 50%, #e0e0e0 70%, #d0d0d0 100%); } }
-        .card-purple { background: linear-gradient(135deg, var(--neon-purple) 0%, #7b2cbf 50%, #5a189a 100%); border: 2px solid #c77dff; box-shadow: 0 0 30px rgba(157,78,221,0.7), inset 0 0 15px rgba(255,255,255,0.2); color: white; text-align: center; aspect-ratio: 16/9; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; padding: 25px; animation: neonPulse 2s infinite alternate; }
-        @keyframes neonPulse { from { box-shadow: 0 0 30px rgba(157,78,221,0.7), inset 0 0 15px rgba(255,255,255,0.2); } to { box-shadow: 0 0 45px rgba(157,78,221,0.9), inset 0 0 20px rgba(255,255,255,0.3); } }
-        .card-purple::before { content: ''; position: absolute; top: -15px; left: -15px; right: -15px; bottom: -15px; background: linear-gradient(45deg, var(--neon-purple), #7b2cbf, #5a189a, var(--neon-purple)); z-index: -1; border-radius: 25px; opacity: 0.6; filter: blur(15px); animation: borderGlow 3s infinite alternate; }
-        @keyframes borderGlow { from { opacity: 0.4; filter: blur(12px); } to { opacity: 0.7; filter: blur(18px); } }
-        .btn { background: linear-gradient(135deg, #111, #222); color: var(--gold); border: none; padding: 16px 35px; border-radius: 35px; font-weight: 800; font-size: 18px; margin-top: 20px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 12px; font-family: 'Orbitron', monospace; box-shadow: 0 8px 20px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); position: relative; z-index: 5; overflow: hidden; }
-        .btn::before { content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%; background: linear-gradient(90deg, transparent, rgba(255,215,0,0.3), transparent); transition: left 0.7s; }
-        .btn:hover::before { left: 100%; }
-        .btn:active { transform: scale(0.95); }
-        .btn-purple { background: linear-gradient(135deg, #5a189a, var(--neon-purple)); color: white; }
-        .btn-cyan { background: linear-gradient(135deg, #00f3ff, #0088ff); color: #000; }
-        .popup { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.98); backdrop-filter: blur(15px); display: none; justify-content: center; align-items: center; z-index: 9999; padding: 20px; animation: popupAppear 0.3s ease-out; }
-        @keyframes popupAppear { from { opacity: 0; backdrop-filter: blur(0); } to { opacity: 1; backdrop-filter: blur(15px); } }
-        .popup-content { background: linear-gradient(135deg, #1a1a20, #2a2a30); padding: 35px; border-radius: 25px; width: 100%; max-width: 400px; border: 2px solid var(--cyan); text-align: center; box-shadow: 0 0 40px rgba(0,243,255,0.3), inset 0 0 20px rgba(0,243,255,0.1); animation: contentAppear 0.4s ease-out; }
-        @keyframes contentAppear { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-        .popup-content h3 { margin-top: 0; color: var(--cyan); font-size: 24px; font-family: 'Orbitron', monospace; text-shadow: 0 0 15px rgba(0,243,255,0.7); }
-        input, textarea { width: 100%; padding: 15px; margin: 12px 0; background: rgba(42,42,48,0.8); border: 2px solid #444; color: white; border-radius: 12px; font-family: inherit; font-size: 16px; transition: all 0.3s; }
-        input:focus, textarea:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 15px rgba(0,243,255,0.3); background: rgba(42,42,48,1); }
-        .hist-item { background: var(--panel); border-radius: 12px; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; border-left: 5px solid #333; width: 100%; transition: all 0.3s; animation: itemAppear 0.5s ease-out; }
-        @keyframes itemAppear { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }
-        .hist-item:hover { transform: translateX(5px); box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
-        .status-completed { color: var(--neon-green); text-shadow: 0 0 10px rgba(0,255,170,0.5); } 
-        .status-pending { color: orange; text-shadow: 0 0 10px rgba(255,165,0,0.5); } 
-        .status-rejected { color: red; text-shadow: 0 0 10px rgba(255,0,0,0.5); }
-        .overlay-loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.98); z-index: 2000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .spinner { width: 60px; height: 60px; border: 6px solid #333; border-top: 6px solid var(--cyan); border-radius: 50%; animation: spin 1s linear infinite; margin: 25px; box-shadow: 0 0 20px rgba(0,243,255,0.5); }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .refer-code-box { background: rgba(255,255,255,0.15); border: 3px dashed var(--cyan); padding: 20px 15px; border-radius: 15px; margin: 15px 0; font-family: 'Orbitron', monospace; font-size: 28px; letter-spacing: 4px; cursor: pointer; text-align: center; word-break: break-all; margin-left: 25px; margin-right: 25px; transition: all 0.3s; animation: codePulse 2s infinite alternate; }
-        @keyframes codePulse { from { box-shadow: 0 0 20px rgba(0,243,255,0.3); } to { box-shadow: 0 0 30px rgba(0,243,255,0.6); } }
-        .refer-code-box:hover { transform: scale(1.05); background: rgba(255,255,255,0.2); }
-        .leaderboard-table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 15px; border-radius: 15px; overflow: hidden; }
-        .leaderboard-table tr { border-bottom: 1px solid rgba(255,255,255,0.15); transition: background 0.3s; }
-        .leaderboard-table tr:hover { background: rgba(0,243,255,0.1); }
-        .leaderboard-table td { padding: 12px 8px; }
-        .leaderboard-table .highlight { background: rgba(0,243,255,0.2); border-left: 5px solid var(--cyan); animation: highlightPulse 2s infinite alternate; }
-        @keyframes highlightPulse { from { background: rgba(0,243,255,0.2); } to { background: rgba(0,243,255,0.3); } }
-        .code-input { font-size: 28px; letter-spacing: 8px; text-align: center; text-transform: uppercase; width: 100%; margin: 15px 0; padding: 20px; border-radius: 15px; border: 3px solid silver; background: white; color: #222; font-family: 'Orbitron', monospace; box-shadow: 0 0 20px rgba(192,192,192,0.5); transition: all 0.3s; }
-        .code-input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 30px rgba(0,243,255,0.7); }
-        .gift-result { text-align: center; margin-top: 25px; padding: 20px; border-radius: 15px; background: rgba(0,0,0,0.4); backdrop-filter: blur(10px); animation: resultAppear 0.5s ease-out; }
-        @keyframes resultAppear { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .referrals-list { max-height: 350px; overflow-y: auto; padding-right: 8px; }
-        .referrals-list::-webkit-scrollbar { width: 8px; }
-        .referrals-list::-webkit-scrollbar-track { background: rgba(255,255,255,0.1); border-radius: 4px; }
-        .referrals-list::-webkit-scrollbar-thumb { background: var(--cyan); border-radius: 4px; box-shadow: inset 0 0 6px rgba(0,0,0,0.3); }
-        .verify-popup { z-index: 10000; }
-        .verify-popup .popup-content { max-width: 450px; }
-        .verify-actions { display: flex; gap: 15px; margin-top: 25px; }
-        .verify-actions button { flex: 1; }
-        .balance-loading { font-size: 56px; font-weight: 900; margin: 8px 0; text-shadow: 0 3px 8px rgba(0,0,0,0.3); color: #666; }
-        .skeleton { background: linear-gradient(90deg, #333 25%, #444 50%, #333 75%); background-size: 200% 100%; animation: loading 1.5s infinite; border-radius: 10px; }
-        @keyframes loading { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-        .action-loading { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 99999; justify-content: center; align-items: center; flex-direction: column; }
-        .action-loader { font-size: 18px; color: white; margin-top: 20px; font-weight: bold; font-family: 'Orbitron', monospace; }
-        .toast { position: fixed; bottom: 25px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 15px 30px; border-radius: 12px; z-index: 10000; display: none; box-shadow: 0 6px 20px rgba(0,0,0,0.4); animation: toastSlide 0.3s ease-out; }
-        @keyframes toastSlide { from { transform: translateX(-50%) translateY(30px); opacity: 0; } to { transform: translateX(-50%) translateY(0); opacity: 1; } }
-        .toast-success { background: linear-gradient(135deg, #28a745, #20c997); }
-        .toast-error { background: linear-gradient(135deg, #dc3545, #fd7e14); }
-        .toast-info { background: linear-gradient(135deg, #17a2b8, #0dcaf0); }
-        .progress-bar { width: 100%; height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin-top: 15px; }
-        .progress-fill { height: 100%; background: linear-gradient(90deg, #00f3ff, #0088ff, var(--neon-pink)); width: 0%; transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
-        .verification-success { color: var(--neon-green); font-weight: bold; margin: 15px 0; font-size: 18px; text-shadow: 0 0 15px rgba(0,255,170,0.7); }
-        .verification-error { color: #ff4444; font-weight: bold; margin: 15px 0; font-size: 18px; text-shadow: 0 0 15px rgba(255,68,68,0.7); }
-        .loading-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle at top, #111122, #050508); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 99999; }
-        .loading-logo { width: 100px; height: 100px; border-radius: 50%; border: 4px solid var(--cyan); box-shadow: 0 0 30px rgba(0,243,255,0.8), inset 0 0 20px rgba(0,243,255,0.3); margin-bottom: 30px; animation: pulse 2s infinite alternate, rotate 20s linear infinite; }
-        @keyframes pulse { 0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; } 50% { transform: scale(1.1) rotate(180deg); opacity: 0.9; } }
-        @keyframes rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        .loading-text { color: var(--cyan); font-size: 22px; font-weight: bold; margin-top: 25px; font-family: 'Orbitron', monospace; text-shadow: 0 0 20px rgba(0,243,255,0.8); animation: textFlow 3s infinite alternate; }
-        @keyframes textFlow { from { letter-spacing: 2px; } to { letter-spacing: 4px; } }
-        .resource-bar { width: 85%; max-width: 350px; margin-top: 25px; }
-        .resource-text { color: #888; font-size: 14px; margin-top: 8px; font-family: 'Rajdhani', sans-serif; }
-        .verification-steps { background: rgba(255,255,255,0.08); border-radius: 15px; padding: 20px; margin-top: 20px; max-height: 250px; overflow-y: auto; backdrop-filter: blur(10px); }
-        .step-item { display: flex; align-items: center; gap: 15px; margin: 8px 0; padding: 12px; border-radius: 10px; background: rgba(255,255,255,0.05); transition: all 0.3s; animation: stepAppear 0.5s ease-out; }
-        @keyframes stepAppear { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }
-        .step-checking { color: #ffaa00; }
-        .step-passed { color: var(--neon-green); }
-        .step-failed { color: #ff4444; }
-        .step-pending { color: #0088ff; }
-        .step-icon { font-size: 18px; width: 25px; text-align: center; }
-        .private-channel-info { background: rgba(0,136,255,0.15); border: 2px solid #0088ff; border-radius: 12px; padding: 15px; margin: 15px 0; animation: infoPulse 3s infinite alternate; }
-        @keyframes infoPulse { from { box-shadow: 0 0 15px rgba(0,136,255,0.3); } to { box-shadow: 0 0 25px rgba(0,136,255,0.6); } }
-        .device-error-retry { margin-top: 20px; }
-        .floating-particles { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: -1; }
-        .floating-coin { position: absolute; font-size: 24px; color: var(--gold); opacity: 0.7; animation: floatCoin 20s infinite linear; }
-        @keyframes floatCoin { 0% { transform: translateY(100vh) rotate(0deg); } 100% { transform: translateY(-100px) rotate(360deg); } }
-        .glitch-text { position: relative; animation: glitch 3s infinite; }
-        @keyframes glitch { 0%, 100% { text-shadow: 2px 2px 0 var(--neon-pink), -2px -2px 0 var(--neon-blue); } 50% { text-shadow: -2px 2px 0 var(--neon-blue), 2px -2px 0 var(--neon-pink); } }
-        .neon-border { position: relative; }
-        .neon-border::after { content: ''; position: absolute; top: -2px; left: -2px; right: -2px; bottom: -2px; border-radius: inherit; background: linear-gradient(45deg, var(--neon-pink), var(--neon-blue), var(--neon-green), var(--neon-purple)); z-index: -1; opacity: 0.7; filter: blur(5px); animation: borderRotate 4s linear infinite; }
-        @keyframes borderRotate { from { filter: hue-rotate(0deg) blur(5px); } to { filter: hue-rotate(360deg) blur(5px); } }
-        .typing-effect { overflow: hidden; border-right: 3px solid var(--cyan); white-space: nowrap; animation: typing 3.5s steps(40, end), blink-caret 0.75s step-end infinite; }
-        @keyframes typing { from { width: 0; } to { width: 100%; } }
-        @keyframes blink-caret { from, to { border-color: transparent; } 50% { border-color: var(--cyan); } }
-        .balance-number { font-family: 'Orbitron', monospace; font-size: 56px; font-weight: 900; margin: 10px 0; text-shadow: 0 0 20px rgba(255,215,0,0.8), 0 0 40px rgba(255,215,0,0.4); background: linear-gradient(45deg, #ffd700, #ffaa00, #ffd700); -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: balanceGlow 2s infinite alternate; }
-        @keyframes balanceGlow { from { text-shadow: 0 0 20px rgba(255,215,0,0.8), 0 0 40px rgba(255,215,0,0.4); } to { text-shadow: 0 0 30px rgba(255,215,0,1), 0 0 60px rgba(255,215,0,0.6), 0 0 90px rgba(255,215,0,0.3); } }
-        .channel-button { background: linear-gradient(135deg, #1a1a1a, #2a2a2a); border: 2px solid var(--cyan); border-radius: 15px; padding: 12px 20px; margin: 8px 0; display: flex; align-items: center; justify-content: space-between; cursor: pointer; transition: all 0.3s; animation: buttonAppear 0.6s ease-out; }
-        .channel-button:hover { transform: translateX(5px); background: linear-gradient(135deg, #2a2a2a, #3a3a3a); box-shadow: 0 0 20px rgba(0,243,255,0.4); }
-        .channel-button i { font-size: 20px; color: var(--cyan); }
-        .channel-button.disabled { opacity: 0.5; border-color: #888; }
-        .channel-button.disabled i { color: #888; }
-        .channel-button.disabled:hover { transform: none; box-shadow: none; }
-        .scan-line { position: absolute; top: 0; left: 0; width: 100%; height: 3px; background: linear-gradient(90deg, transparent, var(--cyan), transparent); animation: scan 3s infinite linear; }
-        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
-        .holographic-effect { background: linear-gradient(45deg, rgba(0,243,255,0.1), rgba(157,78,221,0.1), rgba(255,0,255,0.1)); background-size: 400% 400%; animation: holographic 8s ease infinite; }
-        @keyframes holographic { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            padding: 15px;
+        }
+
+        .app-container {
+            max-width: 500px;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 30px;
+            padding: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            position: relative;
+            margin: 10px 0;
+        }
+
+        /* Loading Screen */
+        .loading-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            transition: opacity 0.5s;
+        }
+
+        .loading-screen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .loading-content {
+            text-align: center;
+            color: white;
+        }
+
+        .loading-spinner {
+            width: 60px;
+            height: 60px;
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        .loading-progress {
+            width: 250px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            margin: 20px auto;
+            overflow: hidden;
+        }
+
+        .loading-progress-bar {
+            height: 100%;
+            background: white;
+            width: 0%;
+            transition: width 0.3s;
+            border-radius: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .profile-pic {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 3px solid #667eea;
+        }
+
+        .profile-icon {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 30px;
+        }
+
+        .user-info {
+            flex: 1;
+        }
+
+        .user-name {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+
+        .contact-admin {
+            font-size: 12px;
+            color: #667eea;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        /* Balance Card */
+        .balance-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 25px;
+            padding: 25px;
+            margin-bottom: 20px;
+            color: white;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+
+        .balance-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.2) 0%, transparent 70%);
+            animation: rotate 20s linear infinite;
+        }
+
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .balance-label {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .balance-amount {
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .withdraw-btn {
+            background: white;
+            color: #667eea;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 15px;
+            font-weight: 700;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .withdraw-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .withdraw-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Locked Overlay */
+        .locked-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(5px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            border-radius: 25px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .locked-icon {
+            font-size: 50px;
+            color: #ffd700;
+            margin-bottom: 15px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        .locked-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 10px;
+        }
+
+        .locked-text {
+            color: #aaa;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        .verify-btn {
+            background: linear-gradient(135deg, #ffd700, #ffaa00);
+            color: #333;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 15px;
+            font-weight: 700;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .verify-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(255, 215, 0, 0.4);
+        }
+
+        /* Navigation */
+        .nav-bar {
+            display: flex;
+            background: white;
+            padding: 10px;
+            border-radius: 20px;
+            margin-bottom: 20px;
+            gap: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .nav-item {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+            padding: 10px;
+            border-radius: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+            color: #888;
+        }
+
+        .nav-item i {
+            font-size: 20px;
+        }
+
+        .nav-item span {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .nav-item.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        /* Tabs */
+        .tab {
+            display: none;
+            animation: fadeIn 0.3s;
+        }
+
+        .tab.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Section */
+        .section {
+            background: white;
+            border-radius: 20px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* History Items */
+        .history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 15px;
+            margin-bottom: 10px;
+            border-left: 5px solid;
+            animation: slideIn 0.3s;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .history-item.completed {
+            border-left-color: #28a745;
+        }
+
+        .history-item.pending {
+            border-left-color: #ffc107;
+        }
+
+        .history-item.rejected {
+            border-left-color: #dc3545;
+        }
+
+        .history-info h4 {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .history-info p {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .history-amount {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .history-amount.completed {
+            color: #28a745;
+        }
+
+        .history-amount.pending {
+            color: #ffc107;
+        }
+
+        .history-amount.rejected {
+            color: #dc3545;
+        }
+
+        .history-status {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 10px;
+            background: #f0f0f0;
+            display: inline-block;
+            margin-top: 5px;
+        }
+
+        /* Gift Card */
+        .gift-input {
+            width: 100%;
+            padding: 20px;
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: 10px;
+            text-align: center;
+            background: #f8f9fa;
+            border: 2px dashed #667eea;
+            border-radius: 15px;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }
+
+        .gift-input:focus {
+            outline: none;
+            border-color: #764ba2;
+            background: white;
+        }
+
+        .gift-result {
+            text-align: center;
+            padding: 15px;
+            border-radius: 15px;
+            margin-top: 15px;
+            font-weight: 600;
+            animation: popIn 0.3s;
+        }
+
+        @keyframes popIn {
+            from { transform: scale(0.9); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+
+        .gift-result.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .gift-result.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        /* Referral Card */
+        .refer-card {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            border-radius: 20px;
+            padding: 25px;
+            color: white;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .refer-code {
+            font-size: 36px;
+            font-weight: 800;
+            letter-spacing: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 20px;
+            border-radius: 15px;
+            margin: 20px 0;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 2px dashed white;
+        }
+
+        .refer-code:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: scale(1.02);
+        }
+
+        .refer-stats {
+            display: flex;
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .refer-stat {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 15px;
+            border-radius: 15px;
+        }
+
+        .refer-stat-value {
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .refer-stat-label {
+            font-size: 12px;
+            opacity: 0.9;
+        }
+
+        /* Leaderboard */
+        .leaderboard-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 15px;
+            margin-bottom: 8px;
+            transition: all 0.3s;
+        }
+
+        .leaderboard-item:hover {
+            transform: translateX(5px);
+            background: #f0f0f0;
+        }
+
+        .leaderboard-item.highlight {
+            background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%);
+            border-left: 5px solid #667eea;
+        }
+
+        .leaderboard-rank {
+            width: 35px;
+            height: 35px;
+            background: white;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        .leaderboard-rank.gold {
+            background: #ffd700;
+            color: #333;
+        }
+
+        .leaderboard-info {
+            flex: 1;
+        }
+
+        .leaderboard-name {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .leaderboard-stats {
+            font-size: 11px;
+            color: #666;
+        }
+
+        .leaderboard-balance {
+            font-weight: 700;
+            color: #28a745;
+        }
+
+        /* Referrals List */
+        .referrals-list {
+            max-height: 400px;
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+
+        .referral-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 15px;
+            margin-bottom: 10px;
+            border-left: 5px solid;
+        }
+
+        .referral-item.verified {
+            border-left-color: #28a745;
+        }
+
+        .referral-item.pending {
+            border-left-color: #ffc107;
+        }
+
+        .referral-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .referral-name {
+            font-weight: 600;
+        }
+
+        .referral-status {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 10px;
+        }
+
+        .referral-status.verified {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .referral-status.pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .referral-id {
+            font-size: 11px;
+            color: #666;
+            font-family: monospace;
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(5px);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 25px;
+            padding: 25px;
+            width: 100%;
+            max-width: 400px;
+            max-height: 90vh;
+            overflow-y: auto;
+            animation: modalSlide 0.3s;
+        }
+
+        @keyframes modalSlide {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-header h3 {
+            font-size: 20px;
+            color: #333;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #666;
+        }
+
+        .modal-close:hover {
+            color: #dc3545;
+        }
+
+        /* Verification Modal */
+        .verification-steps {
+            margin: 20px 0;
+        }
+
+        .step {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin-bottom: 8px;
+            animation: stepAppear 0.3s;
+        }
+
+        @keyframes stepAppear {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .step-icon {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+
+        .step.checking .step-icon {
+            background: #ffc107;
+            color: white;
+        }
+
+        .step.passed .step-icon {
+            background: #28a745;
+            color: white;
+        }
+
+        .step.failed .step-icon {
+            background: #dc3545;
+            color: white;
+        }
+
+        .step-info {
+            flex: 1;
+        }
+
+        .step-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 2px;
+        }
+
+        .step-message {
+            font-size: 12px;
+            color: #666;
+        }
+
+        /* Channel List */
+        .channel-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 2px solid transparent;
+        }
+
+        .channel-item:hover {
+            border-color: #667eea;
+            transform: translateX(5px);
+        }
+
+        .channel-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .channel-info {
+            flex: 1;
+        }
+
+        .channel-name {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .channel-status {
+            font-size: 11px;
+            color: #666;
+        }
+
+        /* Forms */
+        input, textarea {
+            width: 100%;
+            padding: 15px;
+            margin: 8px 0;
+            border: 2px solid #e0e0e0;
+            border-radius: 15px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        /* Buttons */
+        .btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 15px;
+            font-weight: 700;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transition: all 0.3s;
+            margin: 8px 0;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-warning {
+            background: #ffc107;
+            color: #333;
+        }
+
+        /* Action Loader */
+        .action-loader {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 10000;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+
+        .action-loader.active {
+            display: flex;
+        }
+
+        .action-spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        .action-text {
+            color: white;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: white;
+            padding: 15px 30px;
+            border-radius: 50px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            display: none;
+            align-items: center;
+            gap: 10px;
+            z-index: 10001;
+            font-weight: 500;
+            border-left: 5px solid;
+        }
+
+        .toast.show {
+            display: flex;
+            animation: toastSlide 0.3s;
+        }
+
+        @keyframes toastSlide {
+            from { transform: translateX(-50%) translateY(100px); opacity: 0; }
+            to { transform: translateX(-50%) translateY(0); opacity: 1; }
+        }
+
+        .toast.success {
+            border-left-color: #28a745;
+        }
+
+        .toast.error {
+            border-left-color: #dc3545;
+        }
+
+        .toast.info {
+            border-left-color: #667eea;
+        }
+
+        /* Skeleton Loading */
+        .skeleton {
+            background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+            background-size: 200% 100%;
+            animation: loading 1.5s infinite;
+            border-radius: 10px;
+            height: 70px;
+            margin-bottom: 10px;
+        }
+
+        @keyframes loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        /* Empty States */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #aaa;
+        }
+
+        .empty-state i {
+            font-size: 50px;
+            margin-bottom: 15px;
+        }
+
+        /* Device Error */
+        .device-error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 12px;
+            margin: 15px 0;
+            text-align: center;
+        }
+
+        .retry-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 10px;
+            margin-top: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        /* Responsive */
+        @media (max-width: 400px) {
+            .app-container {
+                padding: 15px;
+            }
+            
+            .balance-amount {
+                font-size: 36px;
+            }
+            
+            .refer-code {
+                font-size: 28px;
+                letter-spacing: 3px;
+            }
+            
+            .nav-item span {
+                font-size: 10px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div id="particles-container" class="floating-particles"></div>
-    
-    <div id="loading-screen" class="loading-screen">
-        <div class="scan-line"></div>
-        <img src="{{ base_url }}/static/{{ settings.logo_filename }}?v={{ timestamp }}" class="loading-logo" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODAiIGhlaWdodD0iODAiIHZpZXdCb3g9IjAgMCA4MCA4MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSI0MCIgY3k9IjQwIiByPSIzOCIgZmlsbD0iIzAwZjNmZiIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjIiLz48L3N2Zz4='">
-        <div class="loading-text glitch-text">{{ settings.bot_name }}</div>
-        <div class="resource-bar">
-            <div class="progress-bar">
-                <div id="resource-progress" class="progress-fill" style="width: 0%;"></div>
+    <!-- Loading Screen -->
+    <div id="loadingScreen" class="loading-screen">
+        <div class="loading-content">
+            <img src="{{ base_url }}/static/{{ settings.logo_filename }}?v={{ timestamp }}" style="width: 100px; height: 100px; border-radius: 20px; margin-bottom: 20px;">
+            <div class="loading-spinner"></div>
+            <h3>{{ settings.bot_name }}</h3>
+            <div class="loading-progress">
+                <div id="loadingProgress" class="loading-progress-bar" style="width: 0%;"></div>
             </div>
-            <div id="resource-text" class="resource-text">Initializing System...</div>
+            <p id="loadingText">Loading resources...</p>
         </div>
     </div>
-    
-    <div id="verification-process" class="action-loading" style="display: none;">
-        <div class="spinner"></div>
-        <div id="verification-text" class="action-loader">Starting Verification Protocol...</div>
-        <div id="verification-steps" class="verification-steps" style="width: 85%; max-width: 350px; margin-top: 25px;"></div>
+
+    <!-- Action Loader -->
+    <div id="actionLoader" class="action-loader">
+        <div class="action-spinner"></div>
+        <div id="actionText" class="action-text">Processing...</div>
     </div>
-    
-    <div id="action-loading" class="action-loading">
-        <div class="spinner"></div>
-        <div id="action-loader-text" class="action-loader">Processing Transaction...</div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <i class="fas fa-info-circle"></i>
+        <span id="toastMessage"></span>
     </div>
-    
-    <div id="toast" class="toast"></div>
-    
-    <div id="app" class="hidden" style="width:100%; display:flex; flex-direction:column; align-items:center;">
-        <div class="header">
-            <img src="{{ base_url }}/static/{{ settings.logo_filename }}?v={{ timestamp }}" class="logo" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTAiIGhlaWdodD0iNTAiIHZpZXdCb3g9IjAgMCA1MCA1MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIyNSIgY3k9IjI1IiByPSIyMyIgZmlsbD0iIzAwZjNmZiIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjIiLz48L3N2Zz4='">
-            <div class="title typing-effect">{{ settings.bot_name }}</div>
-        </div>
-        
-        <div class="nav-bar">
-            <button class="nav-btn active" onclick="switchTab('home')">
-                <i class="fas fa-home"></i>
-                <div class="nav-text">HOME</div>
-            </button>
-            <button class="nav-btn" onclick="switchTab('gift')">
-                <i class="fas fa-gift"></i>
-                <div class="nav-text">GIFT</div>
-            </button>
-            <button class="nav-btn" onclick="switchTab('refer')">
-                <i class="fas fa-users"></i>
-                <div class="nav-text">REFER</div>
-            </button>
-            <button class="nav-btn" onclick="switchTab('leaderboard')">
-                <i class="fas fa-trophy"></i>
-                <div class="nav-text">RANK</div>
-            </button>
-        </div>
-        
-        <div id="tab-home" class="tab-content">
-            <div class="card-metal">
-                <div class="p-pic-wrapper"><img src="/get_pfp?uid={{ user_id }}&v={{ timestamp }}" class="p-pic" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"><div class="p-icon"><i class="fas fa-user"></i></div></div>
-                <div style="z-index:2;">
-                    <div style="font-size:22px; font-weight:800; color: #222;">{{ user.name }}</div>
-                    <div onclick="openPop('contact')" style="color:#0044cc; font-size:14px; margin-top:8px; cursor:pointer; text-decoration:underline; font-weight:bold;">Contact Admin</div>
-                </div>
+
+    <!-- Verification Modal -->
+    <div id="verifyModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-shield-alt"></i> Verification Required</h3>
+                <button class="modal-close" onclick="closeVerifyModal()">&times;</button>
             </div>
             
-            <div class="card-gold neon-border" id="balance-card">
-                {% if user_status != 'verified' and not settings.hide_verify_button %}
-                <div id="glass-overlay" class="glass-overlay">
-                    <div style="text-align: center; padding: 25px;">
-                        <i class="fas fa-lock" style="font-size: 50px; color: var(--neon-pink); margin-bottom: 20px; animation: lockPulse 2s infinite alternate;"></i>
-                        @keyframes lockPulse { from { transform: scale(1); } to { transform: scale(1.1); filter: drop-shadow(0 0 15px var(--neon-pink)); } }
-                        <div style="font-size: 22px; font-weight: bold; color: white; margin-bottom: 10px;">Account Locked</div>
-                        <div style="font-size: 15px; color: #aaa; margin-top: 15px; max-width: 280px; line-height: 1.5;">
-                            Complete verification to unlock your wallet{% if user.verified %} and refresh channel access{% endif %}
-                        </div>
-                        <button class="unlock-btn" onclick="startVerification()">
-                            <i class="fas fa-unlock-alt"></i> {% if user.verified %}CHECK CHANNELS{% else %}VERIFY NOW{% endif %}
-                        </button>
+            <div id="verifyError" class="device-error" style="display: none;"></div>
+            
+            <div id="verifySteps" class="verification-steps">
+                <!-- Steps will be added here -->
+            </div>
+            
+            <div id="channelList" class="channel-list" style="display: none;">
+                <!-- Channel list will be added here -->
+            </div>
+            
+            <button id="retryDeviceBtn" class="retry-btn" style="display: none;" onclick="retryDeviceVerification()">
+                <i class="fas fa-redo"></i> Retry Device Check
+            </button>
+            
+            <button class="btn btn-primary" onclick="closeVerifyModal()">
+                <i class="fas fa-times"></i> Close
+            </button>
+        </div>
+    </div>
+
+    <!-- Withdraw Modal -->
+    <div id="withdrawModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-money-bill-wave"></i> Withdraw Money</h3>
+                <button class="modal-close" onclick="closeModal('withdrawModal')">&times;</button>
+            </div>
+            
+            <input type="text" id="upiId" placeholder="Enter UPI ID (e.g., name@okhdfcbank)">
+            <input type="number" id="withdrawAmount" placeholder="Amount (Min: ₹{{ settings.min_withdrawal }})">
+            
+            <button class="btn btn-success" onclick="submitWithdraw()">
+                <i class="fas fa-paper-plane"></i> Submit Request
+            </button>
+            <button class="btn btn-danger" onclick="closeModal('withdrawModal')">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+        </div>
+    </div>
+
+    <!-- Contact Modal -->
+    <div id="contactModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-headset"></i> Contact Admin</h3>
+                <button class="modal-close" onclick="closeModal('contactModal')">&times;</button>
+            </div>
+            
+            <textarea id="contactMessage" rows="4" placeholder="Type your message..."></textarea>
+            <input type="file" id="contactImage" accept="image/*">
+            
+            <button class="btn btn-primary" onclick="sendContact()">
+                <i class="fas fa-paper-plane"></i> Send Message
+            </button>
+            <button class="btn btn-danger" onclick="closeModal('contactModal')">
+                <i class="fas fa-times"></i> Cancel
+            </button>
+        </div>
+    </div>
+
+    <!-- Main App Container -->
+    <div id="app" class="app-container" style="display: none;">
+        <!-- Header -->
+        <div class="header">
+            {% if user.photo %}
+            <img src="/get_pfp?uid={{ user_id }}" class="profile-pic">
+            {% else %}
+            <div class="profile-icon">
+                <i class="fas fa-user"></i>
+            </div>
+            {% endif %}
+            
+            <div class="user-info">
+                <div class="user-name">{{ user.name }}</div>
+                <div class="contact-admin" onclick="openModal('contactModal')">
+                    <i class="fas fa-headset"></i> Contact Admin
+                </div>
+            </div>
+        </div>
+
+        <!-- Balance Card -->
+        <div class="balance-card" id="balanceCard">
+            {% if user_status != 'verified' and not settings.hide_verify_button %}
+            <div class="locked-overlay" id="lockedOverlay">
+                <i class="fas fa-lock locked-icon"></i>
+                <div class="locked-title">Account Locked</div>
+                <div class="locked-text">Complete verification to access your wallet</div>
+                <button class="verify-btn" onclick="startVerification()">
+                    <i class="fas fa-unlock-alt"></i> VERIFY NOW
+                </button>
+            </div>
+            {% endif %}
+            
+            <div class="balance-label">
+                <i class="fas fa-wallet"></i> Wallet Balance
+            </div>
+            <div class="balance-amount" id="balanceAmount">₹{{ "%.2f"|format(user.balance) }}</div>
+            
+            <button class="withdraw-btn" id="withdrawBtn" onclick="openModal('withdrawModal')" {% if user_status != 'verified' %}disabled{% endif %}>
+                <i class="fas fa-money-bill-wave"></i> WITHDRAW
+            </button>
+        </div>
+
+        <!-- Navigation -->
+        <div class="nav-bar">
+            <div class="nav-item active" onclick="switchTab('home')">
+                <i class="fas fa-home"></i>
+                <span>HOME</span>
+            </div>
+            <div class="nav-item" onclick="switchTab('gift')">
+                <i class="fas fa-gift"></i>
+                <span>GIFT</span>
+            </div>
+            <div class="nav-item" onclick="switchTab('refer')">
+                <i class="fas fa-users"></i>
+                <span>REFER</span>
+            </div>
+            <div class="nav-item" onclick="switchTab('rank')">
+                <i class="fas fa-trophy"></i>
+                <span>RANK</span>
+            </div>
+        </div>
+
+        <!-- Home Tab -->
+        <div id="tab-home" class="tab active">
+            <div class="section">
+                <div class="section-title">
+                    <i class="fas fa-history"></i> Recent Activity
+                </div>
+                <div id="historyList">
+                    <!-- History items will be loaded here -->
+                    <div class="skeleton"></div>
+                    <div class="skeleton"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gift Tab -->
+        <div id="tab-gift" class="tab">
+            <div class="section">
+                <div class="section-title">
+                    <i class="fas fa-gift"></i> Claim Gift Code
+                </div>
+                
+                <input type="text" id="giftCode" class="gift-input" maxlength="5" placeholder="ABCDE" oninput="this.value = this.value.toUpperCase()">
+                
+                <button class="btn btn-primary" onclick="claimGift()">
+                    <i class="fas fa-gift"></i> CLAIM GIFT
+                </button>
+                
+                <div id="giftResult" class="gift-result" style="display: none;"></div>
+            </div>
+        </div>
+
+        <!-- Refer Tab -->
+        <div id="tab-refer" class="tab">
+            <div class="refer-card">
+                <i class="fas fa-users" style="font-size: 40px; margin-bottom: 15px;"></i>
+                <h3>Refer & Earn</h3>
+                
+                <div class="refer-code" id="referCode" onclick="copyReferCode()">
+                    LOADING...
+                </div>
+                
+                <div class="refer-stats">
+                    <div class="refer-stat">
+                        <div class="refer-stat-value" id="totalRefers">0</div>
+                        <div class="refer-stat-label">Total</div>
+                    </div>
+                    <div class="refer-stat">
+                        <div class="refer-stat-value" id="verifiedRefers">0</div>
+                        <div class="refer-stat-label">Verified</div>
+                    </div>
+                    <div class="refer-stat">
+                        <div class="refer-stat-value" id="pendingRefers">0</div>
+                        <div class="refer-stat-label">Pending</div>
                     </div>
                 </div>
-                {% endif %}
-                <div style="font-size:16px; font-weight:800; opacity:0.9; letter-spacing:3px; color: #2e2003;">WALLET BALANCE</div>
-                <div id="balance-amount" class="balance-number">₹{{ "%.2f"|format(user.balance) }}</div>
-                <button class="btn" onclick="openPop('withdraw')" {% if user_status != 'verified' %}disabled style="opacity:0.5;"{% endif %}><i class="fas fa-wallet"></i> WITHDRAW</button>
+                
+                <button class="btn btn-warning" onclick="shareReferLink()">
+                    <i class="fas fa-share-alt"></i> Share Link
+                </button>
             </div>
             
-            <div style="margin-top:25px; width:100%;">
-                <div style="color:#888; font-size:15px; font-weight:bold; margin-bottom:15px; display: flex; align-items: center; gap: 10px;">
-                    <i class="fas fa-history"></i> RECENT ACTIVITY
+            <div class="section">
+                <div class="section-title">
+                    <i class="fas fa-user-friends"></i> Your Referrals
                 </div>
-                <div id="history-list">
-                    <div class="hist-item skeleton" style="height:70px;"></div>
-                    <div class="hist-item skeleton" style="height:70px;"></div>
-                </div>
-            </div>
-        </div>
-        
-        <div id="tab-gift" class="tab-content hidden">
-            <div style="text-align:center; margin-bottom:25px;">
-                <h2 style="margin:0; color:var(--cyan); text-shadow: 0 0 20px rgba(0,243,255,0.7);">GIFT CODE</h2>
-                <p style="color:#aaa; margin-top:8px; font-size: 15px;">Enter 5-character code to claim rewards</p>
-            </div>
-            <div class="card-silver holographic-effect">
-                <input type="text" id="gift-code" class="code-input" maxlength="5" placeholder="ABCDE" oninput="this.value = this.value.toUpperCase()">
-                <button class="btn" onclick="claimGift()" style="background:linear-gradient(135deg, #222, #333); color:silver; margin-top: 25px;"><i class="fas fa-gift"></i> CLAIM NOW</button>
-            </div>
-            <div id="gift-result" class="gift-result"></div>
-        </div>
-        
-        <div id="tab-refer" class="tab-content hidden">
-            <div style="text-align:center; margin-bottom:25px;">
-                <h2 style="margin:0; color:var(--neon-purple); text-shadow: 0 0 20px rgba(157,78,221,0.7);">REFER & EARN</h2>
-                <p style="color:#aaa; margin-top:8px; font-size: 15px;">Share your code and earn rewards</p>
-            </div>
-            <div class="card-purple">
-                <div id="refer-code-display" class="refer-code-box" onclick="copyReferCode()">LOADING...</div>
-                <button class="btn btn-purple" onclick="shareReferLink()" style="margin-top:25px;"><i class="fas fa-share-alt"></i> SHARE LINK</button>
-            </div>
-            <div style="width:100%; margin-top:25px;">
-                <h3 style="color:var(--neon-purple); margin-bottom:15px; display: flex; align-items: center; gap: 10px;">
-                    <i class="fas fa-users"></i> YOUR REFERRALS
-                </h3>
-                <div id="referrals-list" class="referrals-list">
-                    <div style="text-align:center; color:#666; padding:30px; font-size: 16px;">Loading referrals...</div>
+                
+                <div id="referralsList" class="referrals-list">
+                    <!-- Referrals will be loaded here -->
+                    <div class="empty-state">
+                        <i class="fas fa-users"></i>
+                        <p>No referrals yet</p>
+                    </div>
                 </div>
             </div>
         </div>
-        
-        <div id="tab-leaderboard" class="tab-content hidden">
-            <div style="text-align:center; margin-bottom:25px;">
-                <h2 style="margin:0; color:var(--gold); text-shadow: 0 0 20px rgba(255,215,0,0.7);">LEADERBOARD</h2>
-                <p style="color:#aaa; font-size:15px;">Top 20 Users by Balance</p>
-            </div>
-            <table class="leaderboard-table">
-                <thead>
-                    <tr style="background:linear-gradient(135deg, rgba(255,215,0,0.2), rgba(255,193,7,0.1));">
-                        <td style="font-weight:bold; color:var(--gold); padding: 15px 8px;">RANK</td>
-                        <td style="font-weight:bold; color:var(--gold);">NAME</td>
-                        <td style="font-weight:bold; color:var(--gold); text-align:right;">BALANCE</td>
-                        <td style="font-weight:bold; color:var(--gold); text-align:right;">REFERS</td>
-                    </tr>
-                </thead>
-                <tbody id="leaderboard-list">
+
+        <!-- Rank Tab -->
+        <div id="tab-rank" class="tab">
+            <div class="section">
+                <div class="section-title">
+                    <i class="fas fa-trophy"></i> Top Earners
+                </div>
+                
+                <div id="leaderboardList">
                     {% for user in leaderboard %}
-                    <tr {% if user.user_id == user_id %}class="highlight"{% endif %}>
-                        <td style="font-weight:bold; color:#ccc; font-size: 16px;">{{ loop.index }}</td>
-                        <td>
-                            <div style="font-weight:bold; font-size: 14px;">{{ user.name[:15] }}{% if user.name|length > 15 %}...{% endif %}</div>
-                            <div style="font-size:11px; color:#888;">{{ user.user_id[:8] }}...</div>
-                        </td>
-                        <td style="text-align:right; font-weight:bold; color:var(--gold); font-size: 16px;">₹{{ "%.2f"|format(user.balance) }}</td>
-                        <td style="text-align:right; font-size:13px; color:#aaa;">{{ user.total_refers }}</td>
-                    </tr>
+                    <div class="leaderboard-item {% if user.user_id == user_id %}highlight{% endif %}">
+                        <div class="leaderboard-rank {% if loop.index <= 3 %}gold{% endif %}">
+                            {{ loop.index }}
+                        </div>
+                        <div class="leaderboard-info">
+                            <div class="leaderboard-name">{{ user.name[:20] }}{% if user.name|length > 20 %}...{% endif %}</div>
+                            <div class="leaderboard-stats">
+                                <i class="fas fa-users"></i> {{ user.total_refers }} refers
+                            </div>
+                        </div>
+                        <div class="leaderboard-balance">₹{{ "%.2f"|format(user.balance) }}</div>
+                    </div>
+                    {% else %}
+                    <div class="empty-state">
+                        <i class="fas fa-trophy"></i>
+                        <p>No data available</p>
+                    </div>
                     {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-    
-    <!-- Popups -->
-    <div id="pop-contact" class="popup">
-        <div class="popup-content">
-            <h3>Contact Admin</h3>
-            <textarea id="c-msg" rows="4" placeholder="Your message..."></textarea>
-            <input type="file" id="c-file" accept="image/*">
-            <button class="btn" onclick="sendContact()">SEND MESSAGE</button>
-            <button class="btn" onclick="closePop()" style="background:transparent; color:#f44; margin-top:15px;">Close</button>
-        </div>
-    </div>
-    
-    <div id="pop-withdraw" class="popup">
-        <div class="popup-content">
-            <h3>Withdraw Money</h3>
-            <input id="w-upi" placeholder="Enter UPI ID (e.g. name@bank)">
-            <input id="w-amt" type="number" placeholder="Amount (Min: ₹{{ settings.min_withdrawal }})">
-            <button class="btn" onclick="submitWithdraw()">WITHDRAW</button>
-            <button class="btn" onclick="closePop()" style="background:transparent; color:#f44; margin-top:15px;">Cancel</button>
-        </div>
-    </div>
-    
-    <div id="pop-verify" class="popup verify-popup">
-        <div class="popup-content">
-            <h3>⚠️ Verification Required</h3>
-            <p id="verify-error-msg" style="color:var(--neon-pink); margin:20px 0; font-size: 16px;">Please complete verification to continue</p>
-            <div id="device-error-retry" class="device-error-retry" style="display:none;">
-                <button class="btn" onclick="retryDeviceVerification()" style="background:linear-gradient(135deg, #0088ff, #00ccff); color:white;">RETRY DEVICE CHECK</button>
-            </div>
-            <div id="private-channels-list" style="margin: 20px 0;"></div>
-            <div class="verify-actions">
-                <button class="btn" onclick="closePop()" style="background:linear-gradient(135deg, #dc3545, #fd7e14); color:white;">CLOSE</button>
-                <button class="btn" onclick="retryVerification()" style="background:linear-gradient(135deg, #0088ff, #00ccff); color:white;">RETRY</button>
+                </div>
             </div>
         </div>
     </div>
-    
+
     <script>
-        const UID = "{{ user_id }}";
+        // Configuration
+        const USER_ID = "{{ user_id }}";
         const USER_STATUS = "{{ user_status }}";
         const IS_VERIFIED = {{ user.verified|lower }};
         const DEVICE_VERIFIED = {{ user.device_verified|lower }};
         const HIDE_VERIFY_BUTTON = {{ settings.hide_verify_button|lower }};
-        let referData = null;
-        let isVerified = IS_VERIFIED;
-        let deviceVerified = DEVICE_VERIFIED;
-        let userStatus = USER_STATUS;
-        let deviceFingerprint = null;
+        const MIN_WITHDRAWAL = {{ settings.min_withdrawal }};
         
-        // Create floating particles
-        function createParticles() {
-            const container = document.getElementById('particles-container');
-            for (let i = 0; i < 30; i++) {
-                const coin = document.createElement('div');
-                coin.className = 'floating-coin';
-                coin.innerHTML = '₹';
-                coin.style.left = Math.random() * 100 + 'vw';
-                coin.style.fontSize = (Math.random() * 20 + 15) + 'px';
-                coin.style.animationDuration = (Math.random() * 10 + 15) + 's';
-                coin.style.animationDelay = Math.random() * 5 + 's';
-                coin.style.opacity = Math.random() * 0.5 + 0.3;
-                container.appendChild(coin);
-            }
-        }
+        // State
+        let deviceFingerprint = '';
+        let currentBalance = {{ user.balance }};
+        let currentStep = 0;
+        let verificationInProgress = false;
         
-        // Ultra fast loading with progress bar
+        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
-            createParticles();
-            
-            // Generate device fingerprint
             generateDeviceFingerprint();
+            startLoadingProgress();
             
-            // Start progress animation
-            let progress = 0;
-            const progressBar = document.getElementById('resource-progress');
-            const resourceText = document.getElementById('resource-text');
+            // Load data
+            loadHistory();
+            loadReferInfo();
             
-            const progressInterval = setInterval(() => {
-                progress += 15;
-                progressBar.style.width = progress + '%';
-                
-                if (progress <= 30) resourceText.textContent = "Loading assets...";
-                else if (progress <= 60) resourceText.textContent = "Initializing app...";
-                else if (progress <= 90) resourceText.textContent = "Almost ready...";
-                else resourceText.textContent = "Complete!";
-                
-                if (progress >= 100) {
-                    clearInterval(progressInterval);
-                    
-                    // Hide loading screen and show app
-                    setTimeout(() => {
-                        document.getElementById('loading-screen').style.display = 'none';
-                        document.getElementById('app').classList.remove('hidden');
-                        
-                        // Auto-verify if channel verification is disabled and verify button is hidden
-                        if (HIDE_VERIFY_BUTTON && userStatus !== 'verified') {
-                            setTimeout(() => {
-                                showToast("Account automatically verified!", "success", 3000);
-                                updateBalance();
-                            }, 500);
-                        }
-                        
-                        // Load data in background
-                        setTimeout(loadCriticalData, 100);
-                    }, 100);
-                }
-            }, 30); // Very fast loading
+            // Auto-verify if needed
+            if (HIDE_VERIFY_BUTTON && USER_STATUS !== 'verified') {
+                setTimeout(() => {
+                    startVerification();
+                }, 500);
+            }
         });
         
+        // Loading progress
+        function startLoadingProgress() {
+            let progress = 0;
+            const loadingBar = document.getElementById('loadingProgress');
+            const loadingText = document.getElementById('loadingText');
+            
+            const interval = setInterval(() => {
+                progress += 5;
+                loadingBar.style.width = progress + '%';
+                
+                if (progress <= 30) {
+                    loadingText.textContent = 'Loading resources...';
+                } else if (progress <= 60) {
+                    loadingText.textContent = 'Preparing interface...';
+                } else if (progress <= 90) {
+                    loadingText.textContent = 'Almost ready...';
+                } else {
+                    loadingText.textContent = 'Welcome!';
+                }
+                
+                if (progress >= 100) {
+                    clearInterval(interval);
+                    setTimeout(() => {
+                        document.getElementById('loadingScreen').classList.add('hidden');
+                        document.getElementById('app').style.display = 'block';
+                    }, 300);
+                }
+            }, 50);
+        }
+        
+        // Generate device fingerprint
         function generateDeviceFingerprint() {
-            // Collect browser fingerprint data
             const userAgent = navigator.userAgent;
             const language = navigator.language;
             const platform = navigator.platform;
-            const hardwareConcurrency = navigator.hardwareConcurrency || 'unknown';
-            const deviceMemory = navigator.deviceMemory || 'unknown';
             const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
             
-            const fingerprintData = `${userAgent}|${language}|${platform}|${hardwareConcurrency}|${deviceMemory}|${timezone}|${Math.floor(Date.now()/1000/3600)}`;
+            const data = `${userAgent}|${language}|${platform}|${timezone}|${screen.width}x${screen.height}`;
             
-            // Simple hash
             let hash = 0;
-            for (let i = 0; i < fingerprintData.length; i++) {
-                const char = fingerprintData.charCodeAt(i);
+            for (let i = 0; i < data.length; i++) {
+                const char = data.charCodeAt(i);
                 hash = ((hash << 5) - hash) + char;
                 hash = hash & hash;
             }
             
-            deviceFingerprint = Math.abs(hash).toString(16);
-            localStorage.setItem('device_fp', deviceFingerprint);
+            deviceFingerprint = Math.abs(hash).toString(36);
         }
         
-        function loadCriticalData() {
-            // Load history
-            loadHistory();
-            
-            // Load refer info
-            loadReferInfo();
-            
-            // Check if we need to verify
-            if (userStatus !== 'verified' && !HIDE_VERIFY_BUTTON) {
-                console.log('Verification needed');
-            } else {
-                document.querySelector('#balance-card .btn').disabled = false;
-                document.querySelector('#balance-card .btn').style.opacity = '1';
-            }
-        }
-        
-        function startVerification() {
-            document.getElementById('verification-process').style.display = 'flex';
-            document.getElementById('verification-steps').innerHTML = '';
-            document.getElementById('device-error-retry').style.display = 'none';
-            
-            updateVerificationStep('Starting verification process...', 'checking');
-            
-            // Use cached fingerprint or generate new
-            const fp = deviceFingerprint || localStorage.getItem('device_fp') || 'new-device-' + Date.now();
-            
-            setTimeout(() => {
-                fetch('/api/verify', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        user_id: UID, 
-                        fp: fp,
-                        bot_type: 'main'
-                    })
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.ok) {
-                        // Success - user verified
-                        isVerified = true;
-                        deviceVerified = data.device_verified || false;
-                        userStatus = 'verified';
-                        
-                        // Update steps visualization
-                        if (data.steps) {
-                            data.steps.forEach(step => {
-                                updateVerificationStep(step.message, step.status);
-                            });
-                        }
-                        
-                        // Hide verification process
-                        setTimeout(() => {
-                            document.getElementById('verification-process').style.display = 'none';
-                            
-                            // Hide glass overlay if exists
-                            const glassOverlay = document.getElementById('glass-overlay');
-                            if (glassOverlay) {
-                                glassOverlay.classList.add('hidden');
-                            }
-                            
-                            // Enable withdrawal button
-                            const withdrawBtn = document.querySelector('#balance-card .btn');
-                            withdrawBtn.disabled = false;
-                            withdrawBtn.style.opacity = '1';
-                            
-                            // Update balance
-                            if (data.balance !== undefined) {
-                                document.getElementById('balance-amount').textContent = '₹' + data.balance.toFixed(2);
-                            }
-                            
-                            // Show success message
-                            if (data.bonus > 0) {
-                                showToast(`✅ Verification successful! ₹${data.bonus} bonus added!`, 'success', 5000);
-                            } else {
-                                showToast('✅ Channels verified successfully!', 'success', 3000);
-                            }
-                            
-                            // Load updated data
-                            loadHistory();
-                            loadReferInfo();
-                            
-                            // Show confetti for bonus
-                            if (data.bonus > 0 && typeof confetti === 'function') {
-                                confetti({particleCount: 200, spread: 100, origin: { y: 0.6 }});
-                                setTimeout(() => {
-                                    confetti({particleCount: 150, angle: 60, spread: 80, origin: { x: 0 }});
-                                    confetti({particleCount: 150, angle: 120, spread: 80, origin: { x: 1 }});
-                                }, 250);
-                            }
-                        }, 1000);
-                    } else {
-                        // Verification failed
-                        setTimeout(() => {
-                            document.getElementById('verification-process').style.display = 'none';
-                            showVerificationError(data.msg, data.type, data.retry);
-                        }, 1000);
-                    }
-                })
-                .catch(err => {
-                    document.getElementById('verification-process').style.display = 'none';
-                    showToast('Verification failed. Please try again.', 'error');
-                    console.error('Verification error:', err);
-                });
-            }, 500);
-        }
-        
-        function updateVerificationStep(message, status) {
-            const stepsContainer = document.getElementById('verification-steps');
-            const stepClass = 'step-' + status;
-            const icon = getStatusIcon(status);
-            
-            const stepDiv = document.createElement('div');
-            stepDiv.className = 'step-item';
-            stepDiv.innerHTML = `
-                <div class="step-icon ${stepClass}">${icon}</div>
-                <div class="${stepClass}" style="flex: 1;">${message}</div>
-            `;
-            
-            stepsContainer.appendChild(stepDiv);
-            stepsContainer.scrollTop = stepsContainer.scrollHeight;
-            
-            // Update verification text
-            document.getElementById('verification-text').textContent = getVerificationStatusText(status);
-        }
-        
-        function getStatusIcon(status) {
-            switch(status) {
-                case 'checking': return '⏳';
-                case 'passed': return '✓';
-                case 'failed': return '✗';
-                case 'pending': return '⏱️';
-                default: return '○';
-            }
-        }
-        
-        function getVerificationStatusText(status) {
-            switch(status) {
-                case 'checking': return 'Checking verification...';
-                case 'passed': return 'Verification passed!';
-                case 'failed': return 'Verification failed';
-                case 'pending': return 'Waiting for approval...';
-                default: return 'Processing...';
-            }
-        }
-        
-        function showVerificationError(message, errorType, showRetry = false) {
-            let errorMsg = message;
-            
-            // Update error message in popup
-            document.getElementById('verify-error-msg').textContent = errorMsg;
-            
-            // Show device retry button if needed
-            if (showRetry && errorType === 'device') {
-                document.getElementById('device-error-retry').style.display = 'block';
-            } else {
-                document.getElementById('device-error-retry').style.display = 'none';
-            }
-            
-            document.getElementById('pop-verify').style.display = 'flex';
-        }
-        
-        function retryDeviceVerification() {
-            // Clear cached fingerprint and retry
-            localStorage.removeItem('device_fp');
-            deviceFingerprint = null;
-            generateDeviceFingerprint();
-            
-            document.getElementById('pop-verify').style.display = 'none';
-            startVerification();
-        }
-        
-        function retryVerification() {
-            document.getElementById('pop-verify').style.display = 'none';
-            startVerification();
-        }
-        
-        function showActionLoader(text = 'Processing...') {
-            document.getElementById('action-loader-text').textContent = text;
-            document.getElementById('action-loading').style.display = 'flex';
-        }
-        
-        function hideActionLoader() {
-            document.getElementById('action-loading').style.display = 'none';
-        }
-        
+        // Toast notifications
         function showToast(message, type = 'info', duration = 3000) {
             const toast = document.getElementById('toast');
-            toast.textContent = message;
-            toast.className = 'toast';
-            toast.classList.add('toast-' + type);
-            toast.style.display = 'block';
+            const toastMessage = document.getElementById('toastMessage');
+            
+            toast.className = 'toast ' + type;
+            toastMessage.textContent = message;
+            toast.classList.add('show');
             
             setTimeout(() => {
-                toast.style.display = 'none';
+                toast.classList.remove('show');
             }, duration);
         }
         
-        function updateBalance() {
-            fetch('/api/get_balance?user_id=' + UID)
-                .then(r => r.json())
-                .then(data => {
-                    if (data.ok) {
-                        document.getElementById('balance-amount').textContent = '₹' + data.balance.toFixed(2);
-                    }
-                })
-                .catch(() => {});
+        // Action loader
+        function showLoader(text = 'Processing...') {
+            document.getElementById('actionText').textContent = text;
+            document.getElementById('actionLoader').classList.add('active');
         }
         
+        function hideLoader() {
+            document.getElementById('actionLoader').classList.remove('active');
+        }
+        
+        // Modal functions
+        function openModal(modalId) {
+            document.getElementById(modalId).classList.add('active');
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('active');
+        }
+        
+        function closeVerifyModal() {
+            document.getElementById('verifyModal').classList.remove('active');
+            if (verificationInProgress) {
+                verificationInProgress = false;
+            }
+        }
+        
+        // Tab switching
         function switchTab(tabName) {
-            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.closest('.nav-btn').classList.add('active');
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
             
-            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
-            document.getElementById('tab-' + tabName).classList.remove('hidden');
+            event.currentTarget.classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
             
-            if (tabName === 'leaderboard') {
+            if (tabName === 'rank') {
                 loadLeaderboard();
             } else if (tabName === 'refer') {
                 loadReferInfo();
             }
         }
         
+        // Verification
+        function startVerification() {
+            if (verificationInProgress) return;
+            
+            verificationInProgress = true;
+            currentStep = 0;
+            
+            document.getElementById('verifySteps').innerHTML = '';
+            document.getElementById('verifyError').style.display = 'none';
+            document.getElementById('retryDeviceBtn').style.display = 'none';
+            document.getElementById('channelList').style.display = 'none';
+            
+            openModal('verifyModal');
+            addVerificationStep('Starting verification...', 'checking');
+            
+            showLoader('Verifying...');
+            
+            fetch('/api/verify', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    user_id: USER_ID,
+                    fp: deviceFingerprint
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                
+                if (data.ok) {
+                    // Show steps
+                    if (data.steps) {
+                        data.steps.forEach(step => {
+                            addVerificationStep(step.message, step.status);
+                        });
+                    }
+                    
+                    // Success
+                    setTimeout(() => {
+                        closeVerifyModal();
+                        showToast('Verification successful!', 'success');
+                        
+                        // Update UI
+                        document.getElementById('balanceAmount').textContent = '₹' + data.balance.toFixed(2);
+                        currentBalance = data.balance;
+                        
+                        // Remove locked overlay
+                        const overlay = document.getElementById('lockedOverlay');
+                        if (overlay) {
+                            overlay.remove();
+                        }
+                        
+                        // Enable withdraw button
+                        document.getElementById('withdrawBtn').disabled = false;
+                        
+                        // Show bonus confetti
+                        if (data.bonus > 0) {
+                            showToast(`✨ ₹${data.bonus} bonus added!`, 'success', 5000);
+                            if (typeof confetti === 'function') {
+                                confetti({particleCount: 200, spread: 100, origin: { y: 0.6 }});
+                            }
+                        }
+                        
+                        // Reload data
+                        loadHistory();
+                        loadReferInfo();
+                    }, 1000);
+                    
+                } else {
+                    // Show error
+                    addVerificationStep(data.msg || 'Verification failed', 'failed');
+                    
+                    if (data.type === 'device' && data.retry) {
+                        document.getElementById('retryDeviceBtn').style.display = 'block';
+                        document.getElementById('verifyError').style.display = 'block';
+                        document.getElementById('verifyError').textContent = data.msg;
+                    }
+                    
+                    if (data.type === 'channels') {
+                        // Show channels to join
+                        document.getElementById('channelList').style.display = 'block';
+                        // Add channel list here
+                    }
+                }
+                
+                verificationInProgress = false;
+            })
+            .catch(err => {
+                hideLoader();
+                addVerificationStep('Network error', 'failed');
+                verificationInProgress = false;
+                showToast('Verification failed. Try again.', 'error');
+            });
+        }
+        
+        function addVerificationStep(message, status) {
+            const steps = document.getElementById('verifySteps');
+            const step = document.createElement('div');
+            step.className = 'step ' + status;
+            
+            let icon = '⏳';
+            if (status === 'passed') icon = '✓';
+            else if (status === 'failed') icon = '✗';
+            
+            step.innerHTML = `
+                <div class="step-icon">${icon}</div>
+                <div class="step-info">
+                    <div class="step-title">${message}</div>
+                </div>
+            `;
+            
+            steps.appendChild(step);
+            steps.scrollTop = steps.scrollHeight;
+        }
+        
+        function retryDeviceVerification() {
+            deviceFingerprint = '';
+            generateDeviceFingerprint();
+            closeVerifyModal();
+            setTimeout(() => startVerification(), 500);
+        }
+        
+        // Withdraw
         function submitWithdraw() {
-            if (userStatus !== 'verified') {
-                showToast('Please verify your account first!', 'error');
+            const upi = document.getElementById('upiId').value.trim();
+            const amount = parseFloat(document.getElementById('withdrawAmount').value);
+            
+            if (!upi) {
+                showToast('Please enter UPI ID', 'error');
                 return;
             }
             
-            const upi = document.getElementById('w-upi').value.trim();
-            const amount = document.getElementById('w-amt').value;
-            
-            if (!upi || !amount) {
-                showToast('Please fill all fields', 'error');
+            if (!amount || amount < MIN_WITHDRAWAL) {
+                showToast(`Minimum withdrawal is ₹${MIN_WITHDRAWAL}`, 'error');
                 return;
             }
             
-            closePop();
-            showActionLoader('Processing withdrawal...');
+            if (amount > currentBalance) {
+                showToast('Insufficient balance', 'error');
+                return;
+            }
+            
+            closeModal('withdrawModal');
+            showLoader('Processing withdrawal...');
             
             fetch('/api/withdraw', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({user_id: UID, amount: amount, upi: upi})
+                body: JSON.stringify({
+                    user_id: USER_ID,
+                    amount: amount,
+                    upi: upi
+                })
             })
             .then(r => r.json())
             .then(data => {
-                hideActionLoader();
+                hideLoader();
+                
                 if (data.ok) {
-                    showToast(data.msg, 'success', 5000);
-                    if (data.auto && typeof confetti === 'function') {
-                        confetti({particleCount: 200, spread: 100, origin: { y: 0.6 }});
-                        setTimeout(() => {
-                            confetti({particleCount: 150, angle: 60, spread: 80, origin: { x: 0 }});
-                            confetti({particleCount: 150, angle: 120, spread: 80, origin: { x: 1 }});
-                        }, 250);
+                    showToast(data.msg || 'Withdrawal request submitted!', 'success');
+                    
+                    // Update balance
+                    if (data.new_balance) {
+                        document.getElementById('balanceAmount').textContent = '₹' + data.new_balance.toFixed(2);
+                        currentBalance = data.new_balance;
                     }
-                    if (data.new_balance !== undefined) {
-                        document.getElementById('balance-amount').textContent = '₹' + data.new_balance.toFixed(2);
-                    }
+                    
+                    // Clear form
+                    document.getElementById('upiId').value = '';
+                    document.getElementById('withdrawAmount').value = '';
+                    
+                    // Reload history
                     loadHistory();
+                    
+                    // Show confetti for auto payments
+                    if (data.mode === 'auto' || data.mode === 'fake') {
+                        if (typeof confetti === 'function') {
+                            confetti({particleCount: 200, spread: 100, origin: { y: 0.6 }});
+                        }
+                    }
                 } else {
-                    showToast(data.msg, 'error');
+                    showToast(data.msg || 'Withdrawal failed', 'error');
                 }
             })
             .catch(err => {
-                hideActionLoader();
-                showToast('Withdrawal failed. Please try again.', 'error');
+                hideLoader();
+                showToast('Network error. Try again.', 'error');
             });
         }
         
+        // Contact admin
         function sendContact() {
-            const message = document.getElementById('c-msg').value;
-            const fileInput = document.getElementById('c-file');
+            const message = document.getElementById('contactMessage').value.trim();
+            const image = document.getElementById('contactImage').files[0];
             
-            if (!message.trim()) {
+            if (!message) {
                 showToast('Please enter a message', 'error');
                 return;
             }
             
-            showActionLoader('Sending message...');
+            closeModal('contactModal');
+            showLoader('Sending message...');
             
             const formData = new FormData();
-            formData.append('user_id', UID);
-            formData.append('msg', message);
-            if (fileInput.files[0]) {
-                formData.append('image', fileInput.files[0]);
+            formData.append('user_id', USER_ID);
+            formData.append('message', message);
+            if (image) {
+                formData.append('image', image);
             }
             
-            fetch('/api/contact_upload', {
+            fetch('/api/contact', {
                 method: 'POST',
                 body: formData
             })
             .then(r => r.json())
             .then(data => {
-                hideActionLoader();
+                hideLoader();
+                
                 if (data.ok) {
-                    showToast('Message sent successfully!', 'success');
-                    closePop();
-                    document.getElementById('c-msg').value = '';
-                    document.getElementById('c-file').value = '';
+                    showToast('Message sent to admin!', 'success');
+                    document.getElementById('contactMessage').value = '';
+                    document.getElementById('contactImage').value = '';
                 } else {
-                    showToast('Failed to send: ' + data.msg, 'error');
+                    showToast(data.msg || 'Failed to send', 'error');
                 }
             })
             .catch(err => {
-                hideActionLoader();
-                showToast('Failed to send message', 'error');
+                hideLoader();
+                showToast('Network error', 'error');
             });
         }
         
+        // History
         function loadHistory() {
-            fetch('/api/history?user_id=' + UID)
+            fetch('/api/history?user_id=' + USER_ID)
             .then(r => r.json())
-            .then(history => {
-                const container = document.getElementById('history-list');
-                if (!history || history.length === 0) {
-                    container.innerHTML = '<div style="text-align:center; color:#666; padding:30px; font-size: 16px;">No activity yet</div>';
+            .then(data => {
+                const container = document.getElementById('historyList');
+                
+                if (!data || data.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <i class="fas fa-history"></i>
+                            <p>No transactions yet</p>
+                        </div>
+                    `;
                     return;
                 }
                 
-                container.innerHTML = history.map(item => `
-                    <div class="hist-item" style="border-left-color:${item.status === 'completed' ? 'var(--neon-green)' : item.status === 'pending' ? 'orange' : 'red'}">
-                        <div>
-                            <div style="font-weight:bold; font-size: 16px;">${item.name || 'Transaction'}</div>
-                            <div style="font-size:12px;color:#888; margin-top: 5px;">${item.date || ''}</div>
-                            ${item.tx_id && item.tx_id !== 'BONUS' ? `<div style="font-size:11px;color:#aaa; margin-top: 3px;">ID: ${item.tx_id}</div>` : ''}
+                container.innerHTML = data.map(item => `
+                    <div class="history-item ${item.status}">
+                        <div class="history-info">
+                            <h4>${item.name || 'Transaction'}</h4>
+                            <p>${item.created_at ? item.created_at.slice(0, 16) : ''}</p>
+                            ${item.tx_id && !item.tx_id.startsWith('BONUS') ? 
+                                `<p class="history-status">${item.tx_id}</p>` : ''}
                         </div>
-                        <div style="text-align:right;">
-                            <div style="font-weight:bold; font-size: 18px;">₹${(item.amount || 0).toFixed(2)}</div>
-                            <div class="status-${item.status}" style="font-size: 13px; margin-top: 5px;">${(item.status || '').toUpperCase()}</div>
-                            ${item.utr ? `<div style="font-size:11px;color:#aaa; margin-top: 3px;">${item.utr}</div>` : ''}
+                        <div class="history-amount ${item.status}">
+                            ₹${(item.amount || 0).toFixed(2)}
                         </div>
                     </div>
                 `).join('');
             })
-            .catch(err => {
-                const container = document.getElementById('history-list');
-                container.innerHTML = '<div style="text-align:center; color:#666; padding:30px; font-size: 16px;">Failed to load history</div>';
+            .catch(() => {
+                document.getElementById('historyList').innerHTML = `
+                    <div class="empty-state">
+                        <i class="fas fa-exclamation-circle"></i>
+                        <p>Failed to load history</p>
+                    </div>
+                `;
             });
         }
         
+        // Referral
         function loadReferInfo() {
-            fetch('/api/get_refer_info?user_id=' + UID)
+            fetch('/api/get_refer_info?user_id=' + USER_ID)
             .then(r => r.json())
             .then(data => {
-                if (data.ok) {
-                    referData = data;
-                    document.getElementById('refer-code-display').textContent = data.refer_code;
-                    
-                    const referralsList = document.getElementById('referrals-list');
-                    if (data.referred_users && data.referred_users.length > 0) {
-                        referralsList.innerHTML = data.referred_users.map(user => `
-                            <div style="background:linear-gradient(135deg, rgba(157,78,221,0.15), rgba(123,44,191,0.1)); padding:15px; border-radius:12px; margin-bottom:8px; border: 1px solid rgba(157,78,221,0.3);">
-                                <div style="font-weight:bold; font-size: 15px;">${user.name}</div>
-                                <div style="font-size:11px; color:#888; margin-top: 3px;">ID: ${user.id}</div>
-                                <div style="font-size:12px; margin-top:8px; font-weight:bold; padding: 5px 10px; border-radius: 20px; display: inline-block; background: ${user.verified ? 'rgba(0,255,170,0.2)' : 'rgba(255,165,0,0.2)'}; color:${user.verified ? 'var(--neon-green)' : 'orange'};">
-                                    ${user.status}
-                                </div>
-                            </div>
-                        `).join('');
-                    } else {
-                        referralsList.innerHTML = '<div style="text-align:center; color:#666; padding:30px; font-size: 16px;">No referrals yet. Share your code!</div>';
-                    }
+                if (!data.ok) return;
+                
+                // Update refer code
+                document.getElementById('referCode').textContent = data.refer_code || 'ERROR';
+                
+                // Update stats
+                document.getElementById('totalRefers').textContent = data.total_refers || 0;
+                document.getElementById('verifiedRefers').textContent = data.verified_refers || 0;
+                document.getElementById('pendingRefers').textContent = data.pending_refers || 0;
+                
+                // Update referrals list
+                const list = document.getElementById('referralsList');
+                
+                if (!data.referred_users || data.referred_users.length === 0) {
+                    list.innerHTML = `
+                        <div class="empty-state">
+                            <i class="fas fa-users"></i>
+                            <p>No referrals yet</p>
+                        </div>
+                    `;
+                    return;
                 }
+                
+                list.innerHTML = data.referred_users.map(user => `
+                    <div class="referral-item ${user.verified ? 'verified' : 'pending'}">
+                        <div class="referral-header">
+                            <span class="referral-name">${user.name}</span>
+                            <span class="referral-status ${user.verified ? 'verified' : 'pending'}">
+                                ${user.verified ? '✅ Verified' : '⏳ Pending'}
+                            </span>
+                        </div>
+                        <div class="referral-id">ID: ${user.id}</div>
+                        ${user.username ? `<div class="referral-id">@${user.username}</div>` : ''}
+                    </div>
+                `).join('');
             })
-            .catch(err => {
-                document.getElementById('refer-code-display').textContent = 'ERROR';
+            .catch(() => {
+                document.getElementById('referCode').textContent = 'ERROR';
             });
         }
         
         function copyReferCode() {
-            if (!referData) return;
-            
-            navigator.clipboard.writeText(referData.refer_code)
-                .then(() => showToast('Refer code copied!', 'success', 2000))
+            const code = document.getElementById('referCode').textContent;
+            navigator.clipboard.writeText(code)
+                .then(() => showToast('Referral code copied!', 'success'))
                 .catch(() => showToast('Failed to copy', 'error'));
         }
         
         function shareReferLink() {
-            if (!referData) return;
+            const code = document.getElementById('referCode').textContent;
+            const botUsername = "{{ bot.get_me().username }}";
+            const link = `https://t.me/${botUsername}?start=${code}`;
+            const text = `Join and earn money! Use my referral code: ${code}`;
             
-            const text = `🎉 Join {{ settings.bot_name }} and earn money! Use my refer code: ${referData.refer_code}\n${referData.refer_link}`;
-            const url = `https://t.me/share/url?url=${encodeURIComponent(referData.refer_link)}&text=${encodeURIComponent(text)}`;
-            window.open(url, '_blank');
+            window.open(`https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`, '_blank');
         }
         
+        // Gift codes
         function claimGift() {
-            const code = document.getElementById('gift-code').value.trim().toUpperCase();
+            const code = document.getElementById('giftCode').value.trim().toUpperCase();
             
             if (!code || code.length !== 5) {
-                showToast('Please enter a valid 5-character code', 'error');
+                showToast('Please enter a valid 5-digit code', 'error');
                 return;
             }
             
-            showActionLoader('Claiming gift...');
+            showLoader('Claiming gift...');
             
             fetch('/api/claim_gift', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({user_id: UID, code: code})
+                body: JSON.stringify({
+                    user_id: USER_ID,
+                    code: code
+                })
             })
             .then(r => r.json())
             .then(data => {
-                hideActionLoader();
-                const resultDiv = document.getElementById('gift-result');
+                hideLoader();
+                
+                const resultDiv = document.getElementById('giftResult');
+                resultDiv.style.display = 'block';
+                
                 if (data.ok) {
-                    resultDiv.innerHTML = `<div style="color:var(--neon-green); font-weight:bold; font-size:20px; text-shadow: 0 0 15px rgba(0,255,170,0.7);">${data.msg}</div>`;
-                    document.getElementById('gift-code').value = '';
-                    showToast(data.msg, 'success', 5000);
+                    resultDiv.className = 'gift-result success';
+                    resultDiv.innerHTML = `<i class="fas fa-check-circle"></i> ${data.msg}`;
+                    
+                    // Update balance
+                    if (data.new_balance) {
+                        document.getElementById('balanceAmount').textContent = '₹' + data.new_balance.toFixed(2);
+                        currentBalance = data.new_balance;
+                    }
+                    
+                    // Clear input
+                    document.getElementById('giftCode').value = '';
+                    
+                    // Show confetti
                     if (typeof confetti === 'function') {
-                        confetti({particleCount: 300, spread: 120, origin: { y: 0.6 }});
-                        setTimeout(() => {
-                            confetti({particleCount: 200, angle: 60, spread: 100, origin: { x: 0 }});
-                            confetti({particleCount: 200, angle: 120, spread: 100, origin: { x: 1 }});
-                        }, 250);
+                        confetti({particleCount: 200, spread: 100, origin: { y: 0.6 }});
                     }
-                    if (data.new_balance !== undefined) {
-                        document.getElementById('balance-amount').textContent = '₹' + data.new_balance.toFixed(2);
-                    }
+                    
+                    // Reload history
                     loadHistory();
                 } else {
-                    resultDiv.innerHTML = `<div style="color:#f44; font-weight:bold; font-size:18px; text-shadow: 0 0 15px rgba(255,68,68,0.7);">${data.msg}</div>`;
-                    showToast(data.msg, 'error');
+                    resultDiv.className = 'gift-result error';
+                    resultDiv.innerHTML = `<i class="fas fa-exclamation-circle"></i> ${data.msg}`;
                 }
+                
                 setTimeout(() => {
-                    resultDiv.innerHTML = '';
+                    resultDiv.style.display = 'none';
                 }, 5000);
             })
             .catch(err => {
-                hideActionLoader();
-                showToast('Failed to claim gift code', 'error');
+                hideLoader();
+                showToast('Network error', 'error');
             });
         }
         
+        // Leaderboard
         function loadLeaderboard() {
             fetch('/api/leaderboard')
             .then(r => r.json())
             .then(data => {
-                const container = document.getElementById('leaderboard-list');
+                const container = document.getElementById('leaderboardList');
+                
                 if (!data.data || data.data.length === 0) {
-                    container.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:30px; color:#666; font-size: 16px;">No data available</td></tr>';
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <i class="fas fa-trophy"></i>
+                            <p>No data available</p>
+                        </div>
+                    `;
                     return;
                 }
                 
                 container.innerHTML = data.data.map((user, index) => `
-                    <tr ${user.user_id == UID ? 'class="highlight"' : ''}>
-                        <td style="font-weight:bold; color:#ccc; font-size: 16px;">${index + 1}</td>
-                        <td>
-                            <div style="font-weight:bold; font-size: 14px;">${(user.name || '').substring(0, 15)}${(user.name || '').length > 15 ? '...' : ''}</div>
-                            <div style="font-size:11px; color:#888;">${(user.user_id || '').substring(0, 8)}...</div>
-                        </td>
-                        <td style="text-align:right; font-weight:bold; color:var(--gold); font-size: 16px;">₹${(user.balance || 0).toFixed(2)}</td>
-                        <td style="text-align:right; font-size:13px; color:#aaa;">${user.total_refers || 0}</td>
-                    </tr>
+                    <div class="leaderboard-item ${user.user_id == USER_ID ? 'highlight' : ''}">
+                        <div class="leaderboard-rank ${index < 3 ? 'gold' : ''}">
+                            ${index + 1}
+                        </div>
+                        <div class="leaderboard-info">
+                            <div class="leaderboard-name">${(user.name || '').substring(0, 20)}${(user.name || '').length > 20 ? '...' : ''}</div>
+                            <div class="leaderboard-stats">
+                                <i class="fas fa-users"></i> ${user.total_refers || 0} refers
+                            </div>
+                        </div>
+                        <div class="leaderboard-balance">₹${(user.balance || 0).toFixed(2)}</div>
+                    </div>
                 `).join('');
             })
-            .catch(err => {});
+            .catch(() => {});
         }
         
-        function openPop(id) {
-            document.getElementById('pop-' + id).style.display = 'flex';
-        }
-        
-        function closePop() {
-            document.querySelectorAll('.popup').forEach(popup => {
-                popup.style.display = 'none';
-            });
-        }
-        
-        // Add keyboard shortcuts
-        document.addEventListener('keydown', (e) => {
-            if (e.ctrlKey && e.key === 'r') {
-                e.preventDefault();
-                loadCriticalData();
-                showToast('Data refreshed!', 'info', 1000);
-            }
-        });
+        // Update balance periodically
+        setInterval(() => {
+            fetch('/api/get_balance?user_id=' + USER_ID)
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok && data.balance !== currentBalance) {
+                    document.getElementById('balanceAmount').textContent = '₹' + data.balance.toFixed(2);
+                    currentBalance = data.balance;
+                }
+            })
+            .catch(() => {});
+        }, 30000);
     </script>
 </body>
 </html>
@@ -2286,415 +3782,1448 @@ MINI_APP_TEMPLATE = """
 
 ADMIN_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Admin Panel</title>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel - {{ settings.bot_name }}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { background: #111; color: #ddd; font-family: sans-serif; margin: 0; padding-bottom: 50px; }
-        .nav { background: #222; padding: 10px; display: flex; overflow-x: auto; gap: 10px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; }
-        .nav button { background: none; border: none; color: #888; padding: 10px; font-weight: bold; cursor: pointer; white-space: nowrap; border-radius: 5px; }
-        .nav button.active { background: #007bff; color: white; }
-        .tab { display: none; padding: 15px; } .tab.active { display: block; }
-        .card { background: #222; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
-        input, select, textarea { width: 100%; padding: 10px; background: #333; border: 1px solid #444; color: white; margin: 5px 0; border-radius: 5px; box-sizing: border-box; }
-        .btn { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 5px; margin-top: 10px; font-weight: bold; cursor: pointer;}
-        .btn-del { width: auto; background: #dc3545; padding: 5px 10px; margin: 0; font-size: 12px; cursor: pointer;}
-        .btn-icon { width:35px; height:35px; border-radius:5px; border:none; cursor:pointer; font-weight:bold; font-size:16px; margin-left:5px; display:inline-flex; align-items:center; justify-content:center; }
-        .check { background:#28a745; color:white; } .cross { background:#dc3545; color:white; }
-        .channel-toggle { background:#ff9800; color:white; margin-right:5px; }
-        .channel-disabled { opacity:0.5; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; } 
-        th { text-align: left; color: #888; border-bottom: 1px solid #444; padding:8px; } 
-        td { padding: 8px; border-bottom: 1px solid #333; vertical-align: middle; }
-        .tx-id { font-weight:bold; color:#007bff; display:block; }
-        .u-info { font-size:11px; color:#aaa; display:block; }
-        .paid-utr { font-family:monospace; color:#28a745; background:rgba(40,167,69,0.1); padding:2px 5px; border-radius:4px; font-size:11px; }
-        .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); justify-content:center; align-items:center; z-index:999; }
-        .m-content { background:#222; padding:20px; border-radius:10px; border:1px solid #444; width:90%; max-width:300px; text-align:center; }
-        .gift-row { background: rgba(157,78,221,0.1); margin: 5px 0; padding: 10px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
-        .gift-code { font-family: monospace; font-weight: bold; color: #9d4edd; }
-        .expiry { font-size: 11px; color: #ff9800; }
-        .usage { font-size: 12px; color: #aaa; }
-        .nowrap { white-space: nowrap; }
-        .expired { opacity: 0.5; text-decoration: line-through; }
-        .gen-btn { background: #9d4edd; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 12px; margin-left: 10px; }
-        .admin-loader { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; justify-content: center; align-items: center; flex-direction: column; }
-        .admin-spinner { width: 40px; height: 40px; border: 5px solid #333; border-top: 5px solid #007bff; border-radius: 50%; animation: spin 1s linear infinite; margin: 20px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .admin-loader-text { color: white; font-weight: bold; font-size: 16px; margin-top: 15px; }
-        .user-card { background: #2a2a2a; border-radius: 8px; padding: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.3s; }
-        .user-card:hover { background: #333; }
-        .user-id { font-family: monospace; font-size: 11px; color: #888; }
-        .user-name { font-weight: bold; margin: 5px 0; }
-        .user-balance { color: #ffd700; font-weight: bold; font-size: 16px; }
-        .user-status { font-size: 11px; padding: 2px 6px; border-radius: 10px; }
-        .status-verified { background: rgba(40,167,69,0.2); color: #28a745; }
-        .status-pending { background: rgba(255,193,7,0.2); color: #ffc107; }
-        .channel-details { font-size: 11px; color: #888; margin-top: 5px; }
-        .channel-id { font-family: monospace; }
-        .config-options { display: flex; flex-wrap: wrap; gap: 15px; margin: 15px 0; }
-        .config-option { flex: 1; min-width: 200px; background: #2a2a2a; padding: 15px; border-radius: 8px; }
-        .toggle-switch { position: relative; display: inline-block; width: 50px; height: 24px; margin-left: 10px; }
-        .toggle-switch input { opacity: 0; width: 0; height: 0; }
-        .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 24px; }
-        .toggle-slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
-        input:checked + .toggle-slider { background-color: #007bff; }
-        input:checked + .toggle-slider:before { transform: translateX(26px); }
-        .toggle-label { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        body {
+            background: #1a1a1a;
+            color: #fff;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        /* Header */
+        .header {
+            background: #2d2d2d;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-left: 5px solid #4CAF50;
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            color: #4CAF50;
+        }
+        
+        .header .stats {
+            display: flex;
+            gap: 20px;
+        }
+        
+        .stat-badge {
+            background: #3d3d3d;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        
+        .stat-badge i {
+            margin-right: 5px;
+            color: #4CAF50;
+        }
+        
+        /* Navigation */
+        .nav {
+            background: #2d2d2d;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .nav-btn {
+            background: #3d3d3d;
+            border: none;
+            color: #aaa;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .nav-btn i {
+            font-size: 16px;
+        }
+        
+        .nav-btn:hover {
+            background: #4d4d4d;
+            color: #fff;
+        }
+        
+        .nav-btn.active {
+            background: #4CAF50;
+            color: #fff;
+        }
+        
+        /* Tabs */
+        .tab {
+            display: none;
+            animation: fadeIn 0.3s;
+        }
+        
+        .tab.active {
+            display: block;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Cards */
+        .card {
+            background: #2d2d2d;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid #3d3d3d;
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #3d3d3d;
+        }
+        
+        .card-header h2 {
+            font-size: 18px;
+            color: #4CAF50;
+        }
+        
+        .card-header h2 i {
+            margin-right: 8px;
+        }
+        
+        /* Forms */
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 12px 15px;
+            background: #3d3d3d;
+            border: 1px solid #4d4d4d;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: #4CAF50;
+            background: #454545;
+        }
+        
+        .form-row {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .form-row .form-group {
+            flex: 1;
+        }
+        
+        /* Buttons */
+        .btn {
+            padding: 12px 25px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn-primary {
+            background: #4CAF50;
+            color: #fff;
+        }
+        
+        .btn-primary:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+        }
+        
+        .btn-danger {
+            background: #f44336;
+            color: #fff;
+        }
+        
+        .btn-danger:hover {
+            background: #da190b;
+        }
+        
+        .btn-warning {
+            background: #ff9800;
+            color: #fff;
+        }
+        
+        .btn-warning:hover {
+            background: #e68a00;
+        }
+        
+        .btn-info {
+            background: #2196F3;
+            color: #fff;
+        }
+        
+        .btn-info:hover {
+            background: #0b7dda;
+        }
+        
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+        
+        /* Tables */
+        .table-responsive {
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            text-align: left;
+            padding: 12px;
+            background: #3d3d3d;
+            color: #aaa;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #3d3d3d;
+            font-size: 14px;
+        }
+        
+        tr:hover td {
+            background: #353535;
+        }
+        
+        /* Status badges */
+        .badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            display: inline-block;
+        }
+        
+        .badge-success {
+            background: rgba(76, 175, 80, 0.2);
+            color: #4CAF50;
+        }
+        
+        .badge-warning {
+            background: rgba(255, 152, 0, 0.2);
+            color: #ff9800;
+        }
+        
+        .badge-danger {
+            background: rgba(244, 67, 54, 0.2);
+            color: #f44336;
+        }
+        
+        .badge-info {
+            background: rgba(33, 150, 243, 0.2);
+            color: #2196F3;
+        }
+        
+        /* Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-card {
+            background: #2d2d2d;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #4CAF50;
+        }
+        
+        .stat-card .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+        
+        .stat-card .stat-label {
+            color: #aaa;
+            font-size: 13px;
+        }
+        
+        .stat-card .stat-icon {
+            float: right;
+            font-size: 40px;
+            color: #4CAF50;
+            opacity: 0.3;
+        }
+        
+        /* Channel list */
+        .channel-item {
+            background: #353535;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .channel-info h4 {
+            margin-bottom: 5px;
+        }
+        
+        .channel-info p {
+            color: #aaa;
+            font-size: 12px;
+        }
+        
+        .channel-info p i {
+            margin-right: 5px;
+            color: #4CAF50;
+        }
+        
+        .channel-actions {
+            display: flex;
+            gap: 5px;
+        }
+        
+        /* Gift code items */
+        .gift-item {
+            background: #353535;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .gift-code {
+            font-family: monospace;
+            font-size: 18px;
+            font-weight: 700;
+            color: #4CAF50;
+        }
+        
+        .gift-details {
+            color: #aaa;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+        
+        .gift-details span {
+            margin-right: 15px;
+        }
+        
+        .gift-expired {
+            opacity: 0.5;
+            text-decoration: line-through;
+        }
+        
+        /* Withdrawal items */
+        .withdrawal-item {
+            background: #353535;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        
+        .withdrawal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .withdrawal-id {
+            font-family: monospace;
+            color: #4CAF50;
+        }
+        
+        .withdrawal-amount {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        .withdrawal-details {
+            display: flex;
+            gap: 20px;
+            color: #aaa;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+        
+        .withdrawal-actions {
+            display: flex;
+            gap: 10px;
+        }
+        
+        /* User items */
+        .user-item {
+            background: #353535;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .user-item:hover {
+            background: #3d3d3d;
+            transform: translateX(5px);
+        }
+        
+        .user-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .user-name {
+            font-weight: 600;
+        }
+        
+        .user-id {
+            color: #aaa;
+            font-size: 11px;
+            font-family: monospace;
+        }
+        
+        .user-balance {
+            color: #4CAF50;
+            font-weight: 700;
+        }
+        
+        .user-stats {
+            display: flex;
+            gap: 15px;
+            color: #aaa;
+            font-size: 12px;
+        }
+        
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .modal.active {
+            display: flex;
+        }
+        
+        .modal-content {
+            background: #2d2d2d;
+            border-radius: 10px;
+            padding: 25px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #3d3d3d;
+        }
+        
+        .modal-header h3 {
+            color: #4CAF50;
+        }
+        
+        .modal-close {
+            background: none;
+            border: none;
+            color: #aaa;
+            font-size: 20px;
+            cursor: pointer;
+        }
+        
+        .modal-close:hover {
+            color: #f44336;
+        }
+        
+        /* Toast notifications */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #2d2d2d;
+            color: #fff;
+            padding: 15px 25px;
+            border-radius: 8px;
+            display: none;
+            align-items: center;
+            gap: 10px;
+            z-index: 1001;
+            border-left: 4px solid #4CAF50;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        
+        .toast.show {
+            display: flex;
+            animation: slideIn 0.3s;
+        }
+        
+        .toast.success {
+            border-left-color: #4CAF50;
+        }
+        
+        .toast.error {
+            border-left-color: #f44336;
+        }
+        
+        .toast.warning {
+            border-left-color: #ff9800;
+        }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        /* Loader */
+        .loader {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 2000;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        
+        .loader.active {
+            display: flex;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #3d3d3d;
+            border-top-color: #4CAF50;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loader-text {
+            color: #fff;
+            font-size: 16px;
+        }
+        
+        /* Search */
+        .search-box {
+            position: relative;
+            margin-bottom: 20px;
+        }
+        
+        .search-box i {
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #aaa;
+        }
+        
+        .search-box input {
+            width: 100%;
+            padding: 12px 15px 12px 45px;
+            background: #3d3d3d;
+            border: 1px solid #4d4d4d;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+        }
+        
+        .search-box input:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+        
+        /* Toggle switch */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+        
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #3d3d3d;
+            transition: .3s;
+            border-radius: 24px;
+        }
+        
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .toggle-slider {
+            background-color: #4CAF50;
+        }
+        
+        input:checked + .toggle-slider:before {
+            transform: translateX(26px);
+        }
+        
+        .toggle-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 10px 0;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav {
+                flex-direction: column;
+            }
+            
+            .form-row {
+                flex-direction: column;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
-    <div id="adminLoader" class="admin-loader">
-        <div class="admin-spinner"></div>
-        <div id="adminLoaderText" class="admin-loader-text">Processing...</div>
-    </div>
-    
-    <div id="sendMessageModal" class="modal">
-        <div class="m-content" style="max-width: 400px;">
-            <h3>Send Message to User</h3>
-            <div id="sendToUserInfo" style="text-align: left; margin-bottom: 15px; padding: 10px; background: #2a2a2a; border-radius: 5px;"></div>
-            <textarea id="userMessage" rows="4" placeholder="Enter your message..."></textarea>
-            <input type="file" id="userImage" accept="image/*">
-            <button class="btn" style="background:#28a745" onclick="sendUserMessage()">Send Message</button>
-            <button class="btn" style="background:transparent; color:#f44; margin-top:10px;" onclick="document.getElementById('sendMessageModal').style.display='none'">Cancel</button>
-        </div>
-    </div>
-    
-    <div id="approveModal" class="modal"><div class="m-content"><h3>Enter UTR</h3><input id="utrInput" placeholder="UTR Number"><button class="btn" style="background:#28a745" onclick="confirmApprove()">Confirm Pay</button><button class="btn" style="background:transparent; color:#f44" onclick="document.getElementById('approveModal').style.display='none'">Cancel</button></div></div>
-    
-    <div class="nav">
-        <button class="active" onclick="tab('dash')">Stats</button>
-        <button onclick="tab('withs')">Withdraws</button>
-        <button onclick="tab('users')">Users</button>
-        <button onclick="tab('sets')">Config</button>
-        <button onclick="tab('chans')">Channels</button>
-        <button onclick="tab('admins')">Admins</button>
-        <button onclick="tab('gifts')">Gift Codes</button>
-        <button onclick="tab('bc')">Broadcast</button>
-    </div>
-    
-    <div id="dash" class="tab active">
-        <div class="card">
-            <h3>Total Users: <span style="color:#007bff">{{ stats.total_users }}</span></h3>
-            <h3>Pending Withdrawals: <span style="color:#ffc107">{{ stats.pending_count }}</span></h3>
-            <h3>Active Gift Codes: <span style="color:#9d4edd">{{ gifts|length }}</span></h3>
-        </div>
-    </div>
-    
-    <div id="withs" class="tab">
-        <div class="card" style="padding:0; overflow:hidden;">
-            <table style="width:100%;">
-                <tr style="background:#2a2a30;">
-                    <th>Request Info</th>
-                    <th style="text-align:right;">Action</th>
-                </tr>
-                {% for w in withdrawals %}
-                <tr>
-                    <td>
-                        <span class="tx-id">{{ w.tx_id }}</span>
-                        <span class="u-info">ID: {{ w.user_id }}</span>
-                        <div style="color:#ffc107; font-weight:bold; margin-top:2px;">₹{{ w.amount }}</div>
-                        <div style="font-size:10px; color:#888;">{{ w.upi }}</div>
-                    </td>
-                    <td style="text-align:right;">
-                        {% if w.status == 'pending' %}
-                        <button class="btn-icon check" onclick="openApprove('{{ w.tx_id }}')">✔</button>
-                        <button class="btn-icon cross" onclick="proc('{{ w.tx_id }}','rejected')">✘</button>
-                        {% elif w.status == 'completed' %}
-                        <span class="paid-utr">{{ w.utr }}</span>
-                        {% else %}
-                        <span style="color:#dc3545; font-size:11px;">REJECTED</span>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </table>
-        </div>
-    </div>
-
-    <div id="users" class="tab">
-        <div class="card">
-            <input placeholder="Search by name, ID or username" onkeyup="searchUsers(this)" style="margin-bottom: 15px;">
-            <div id="usersContainer">
-                {% for user in users %}
-                <div class="user-card" onclick="openUserMessage('{{ user.id }}', '{{ user.name|escape }}', '{{ user.username|escape }}', {{ user.balance }}, {{ user.verified }}, {{ user.device_verified }}, '{{ user.refer_code }}', {{ user.refer_count }})">
-                    <div style="flex: 1;">
-                        <div class="user-id">{{ user.id }}</div>
-                        <div class="user-name">
-                            {{ user.name }}
-                            {% if user.username %}
-                            <span style="color: #888; font-size: 11px;">(@{{ user.username }})</span>
-                            {% endif %}
-                        </div>
-                        <div style="display: flex; gap: 15px; margin-top: 5px;">
-                            <div>
-                                <div style="font-size: 11px; color: #888;">Refer Code</div>
-                                <div style="font-family: monospace; font-size: 12px;">{{ user.refer_code }}</div>
-                                <div style="font-size: 10px; color: #666;">{{ user.refer_count }} refers</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div style="text-align: right;">
-                        <div class="user-balance">₹{{ "%.2f"|format(user.balance) }}</div>
-                        <div class="user-status {% if user.verified and user.device_verified %}status-verified{% else %}status-pending{% endif %}">
-                            {% if user.verified and user.device_verified %}✅ Verified{% else %}⏳ Pending{% endif %}
-                        </div>
-                        <div style="font-size: 10px; color: #666; margin-top: 5px;">
-                            {{ user.joined_date[:10] if user.joined_date else 'N/A' }}
-                        </div>
-                    </div>
-                </div>
-                {% endfor %}
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1><i class="fas fa-crown"></i> {{ settings.bot_name }} - Admin Panel</h1>
+            <div class="stats">
+                <div class="stat-badge"><i class="fas fa-users"></i> {{ stats.total_users }} Users</div>
+                <div class="stat-badge"><i class="fas fa-clock"></i> {{ stats.pending_count }} Pending</div>
+                <div class="stat-badge"><i class="fas fa-wallet"></i> ₹{{ "%.2f"|format(upi_balance.balance) }}</div>
             </div>
         </div>
-    </div>
-    
-    <div id="sets" class="tab">
-        <div class="config-options">
-            <div class="config-option">
-                <h3>Basic Settings</h3>
-                <label>Bot Name</label><input id="bName" value="{{ settings.bot_name }}">
-                <label>App Display Name</label><input id="appName" value="{{ settings.app_name }}">
-                <label>Min Withdraw (₹)</label><input type="number" id="minW" value="{{ settings.min_withdrawal }}">
-                <label>Welcome Bonus (₹)</label><input type="number" id="bonus" value="{{ settings.welcome_bonus }}">
-                <label>Min Refer Reward (₹)</label><input type="number" id="minRef" value="{{ settings.min_refer_reward }}">
-                <label>Max Refer Reward (₹)</label><input type="number" id="maxRef" value="{{ settings.max_refer_reward }}">
+        
+        <!-- Navigation -->
+        <div class="nav">
+            <button class="nav-btn active" onclick="switchTab('dashboard')"><i class="fas fa-home"></i> Dashboard</button>
+            <button class="nav-btn" onclick="switchTab('withdrawals')"><i class="fas fa-money-bill-wave"></i> Withdrawals</button>
+            <button class="nav-btn" onclick="switchTab('users')"><i class="fas fa-users"></i> Users</button>
+            <button class="nav-btn" onclick="switchTab('channels')"><i class="fas fa-tv"></i> Channels</button>
+            <button class="nav-btn" onclick="switchTab('gifts')"><i class="fas fa-gift"></i> Gift Codes</button>
+            <button class="nav-btn" onclick="switchTab('settings')"><i class="fas fa-cog"></i> Settings</button>
+            <button class="nav-btn" onclick="switchTab('upi')"><i class="fas fa-credit-card"></i> UPI Settings</button>
+            <button class="nav-btn" onclick="switchTab('broadcast')"><i class="fas fa-broadcast-tower"></i> Broadcast</button>
+        </div>
+        
+        <!-- Loader -->
+        <div id="loader" class="loader">
+            <div class="spinner"></div>
+            <div id="loaderText" class="loader-text">Processing...</div>
+        </div>
+        
+        <!-- Toast -->
+        <div id="toast" class="toast">
+            <i class="fas fa-info-circle"></i>
+            <span id="toastMessage"></span>
+        </div>
+        
+        <!-- Dashboard Tab -->
+        <div id="tab-dashboard" class="tab active">
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-users"></i></div>
+                    <div class="stat-value">{{ stats.total_users }}</div>
+                    <div class="stat-label">Total Users</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
+                    <div class="stat-value">{{ users|selectattr('verified', 'equalto', True)|list|length }}</div>
+                    <div class="stat-label">Verified Users</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-clock"></i></div>
+                    <div class="stat-value">{{ stats.pending_count }}</div>
+                    <div class="stat-label">Pending Withdrawals</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-rupee-sign"></i></div>
+                    <div class="stat-value">₹{{ "%.2f"|format(stats.total_balance) }}</div>
+                    <div class="stat-label">Total Balance</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-history"></i></div>
+                    <div class="stat-value">₹{{ "%.2f"|format(stats.total_withdrawn) }}</div>
+                    <div class="stat-label">Total Withdrawn</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-gift"></i></div>
+                    <div class="stat-value">{{ gifts|length }}</div>
+                    <div class="stat-label">Active Gift Codes</div>
+                </div>
             </div>
             
-            <div class="config-option">
-                <h3>Verification Settings</h3>
-                <div class="toggle-label">
-                    <span>Disable Channel Verification:</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="disable_channel_verification" {{ 'checked' if settings.disable_channel_verification else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-clock"></i> Recent Pending Withdrawals</h2>
+                    <button class="btn btn-sm btn-primary" onclick="switchTab('withdrawals')">View All</button>
                 </div>
-                <div class="toggle-label">
-                    <span>Auto Accept Private Channels:</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="auto_accept_private" {{ 'checked' if settings.auto_accept_private else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="toggle-label">
-                    <span>Hide Verify Button in App:</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="hide_verify_button" {{ 'checked' if settings.hide_verify_button else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="toggle-label">
-                    <span>Disable Bot for Users:</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="dis" {{ 'checked' if settings.bots_disabled else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="toggle-label">
-                    <span>Auto-Withdraw (Instant Payment):</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="auto" {{ 'checked' if settings.auto_withdraw else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="toggle-label">
-                    <span>Allow Same Device Multiple Accounts:</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="idevice" {{ 'checked' if settings.ignore_device_check else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="toggle-label">
-                    <span>Disable Withdrawals:</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="withdraw_disabled" {{ 'checked' if settings.withdraw_disabled else '' }}>
-                        <span class="toggle-slider"></span>
-                    </label>
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>TxID</th>
+                                <th>User</th>
+                                <th>Amount</th>
+                                <th>UPI</th>
+                                <th>Date</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for w in pending_withdrawals[:5] %}
+                            <tr>
+                                <td><span class="badge badge-info">{{ w.tx_id }}</span></td>
+                                <td>{{ w.name }}<br><small class="badge">{{ w.user_id }}</small></td>
+                                <td><span class="badge badge-warning">₹{{ w.amount }}</span></td>
+                                <td>{{ w.upi }}</td>
+                                <td>{{ w.created_at[:10] }}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-success" onclick="openApproveModal('{{ w.tx_id }}')"><i class="fas fa-check"></i></button>
+                                    <button class="btn btn-sm btn-danger" onclick="rejectWithdrawal('{{ w.tx_id }}')"><i class="fas fa-times"></i></button>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="6" style="text-align: center; padding: 30px; color: #aaa;">
+                                    <i class="fas fa-check-circle" style="font-size: 40px; margin-bottom: 10px; display: block;"></i>
+                                    No pending withdrawals
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
-        <button class="btn" onclick="saveBasic()">Save Settings</button>
         
-        <div class="card">
-            <h3>Upload Logo</h3>
-            <input type="file" id="logoFile" accept="image/*">
-            <button class="btn" onclick="upLogo()">Upload Logo</button>
-            <p style="font-size:12px; color:#888; margin-top:10px;">Current: {{ settings.logo_filename }}</p>
-        </div>
-    </div>
-    
-    <div id="chans" class="tab">
-        <div class="card">
-            <h3>Add Channel</h3>
-            <input id="cName" placeholder="Channel Name (e.g. News Channel)">
-            <input id="cLink" placeholder="Channel Link (https://t.me/...)">
-            <input id="cId" placeholder="Channel ID (e.g. @channelusername or -1001234567890)">
-            <button class="btn" onclick="addChan()">Add Channel</button>
-            <p style="font-size:12px; color:#888; margin-top:10px;">Users must join these channels to verify</p>
-        </div>
-        <div class="card">
-            <h3>Current Channels</h3>
-            <table>
-                {% for ch in settings.channels %}
-                <tr>
-                    <td>
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <button class="btn-icon channel-toggle {{ 'channel-disabled' if ch.disabled else '' }}" onclick="toggleChannel({{ loop.index0 }})" title="{{ 'Enable verification' if ch.disabled else 'Disable verification' }}">
-                                {{ '✓' if not ch.disabled else '✗' }}
-                            </button>
-                            <div>
-                                <div style="font-weight: bold;">{{ ch.btn_name }}</div>
-                                <div class="channel-details">
-                                    <div>Link: <a href="{{ ch.link }}" target="_blank" style="color: #007bff;">{{ ch.link[:30] }}...</a></div>
-                                    <div class="channel-id">ID: {{ ch.id }}</div>
-                                    <div style="color: {{ '#28a745' if not ch.disabled else '#ff9800' }}; font-size: 10px;">
-                                        {{ 'Verification Enabled' if not ch.disabled else 'Verification Disabled' }}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </td>
-                    <td><button class="btn-del" onclick="delChan({{ loop.index0 }})">Delete</button></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="2" style="text-align:center; color:#888; padding:20px;">No channels added</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-    </div>
-    
-    <div id="admins" class="tab">
-        <div class="card">
-            <h3>Add Admin</h3>
-            <input id="newAdmin" placeholder="Telegram User ID (e.g. 1234567890)">
-            <button class="btn" onclick="addAdmin()">Add Admin</button>
-            <p style="font-size:12px; color:#888; margin-top:10px;">Main Admin ID: {{ ADMIN_ID }}</p>
-        </div>
-        <div class="card">
-            <h3>Current Admins</h3>
-            <table>
-                {% for adm in settings.admins %}
-                <tr>
-                    <td>{{ adm }}</td>
-                    <td><button class="btn-del" onclick="remAdmin('{{ adm }}')">Remove</button></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="2" style="text-align:center; color:#888; padding:20px;">No additional admins</td></tr>
-                {% endfor %}
-            </table>
-        </div>
-    </div>
-    
-    <div id="gifts" class="tab">
-        <div class="card">
-            <h3>Create Gift Code</h3>
-            <div style="display:flex; align-items:center; margin:10px 0;">
-                <input id="giftCode" placeholder="Enter 5-character code" maxlength="5" style="text-transform:uppercase; flex:1;">
-                <button class="gen-btn" onclick="generateCode()">GENERATE</button>
-            </div>
-            <label>Min Amount (₹)</label><input type="number" id="giftMin" value="10" step="0.01">
-            <label>Max Amount (₹)</label><input type="number" id="giftMax" value="50" step="0.01">
-            <label>Expiry (Hours)</label><input type="number" id="giftExpiry" value="2">
-            <label>Total Uses</label><input type="number" id="giftUses" value="1">
-            <button class="btn" onclick="createGift()" style="background:#9d4edd;">Create Gift Code</button>
-        </div>
-        
-        <div class="card">
-            <h3>Active Gift Codes</h3>
-            {% for gift in gifts %}
-            <div class="gift-row {% if gift.expired %}expired{% endif %}">
-                <div>
-                    <div class="gift-code">{{ gift.code }}</div>
-                    <div class="expiry">
-                        {% if gift.expired %}
-                        EXPIRED
-                        {% else %}
-                        {% set expiry_time = gift.expiry|fromisoformat %}
-                        {% set remaining = (expiry_time - now).total_seconds() / 60 %}
-                        Expires in: {{ remaining|int }} mins
-                        {% endif %}
+        <!-- Withdrawals Tab -->
+        <div id="tab-withdrawals" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-list"></i> All Withdrawals</h2>
+                    <div>
+                        <select id="withdrawFilter" class="form-control" style="width: auto; display: inline-block;" onchange="filterWithdrawals()">
+                            <option value="all">All</option>
+                            <option value="pending">Pending</option>
+                            <option value="completed">Completed</option>
+                            <option value="rejected">Rejected</option>
+                        </select>
                     </div>
                 </div>
-                <div style="text-align:center;">
-                    <div class="usage">{{ gift.used_by|length }}/{{ gift.total_uses }} uses</div>
-                    <div style="font-size:11px; color:{% if gift.used_by|length >= gift.total_uses %}#f44{% else %}#0f0{% endif %};">₹{{ gift.min_amount }} - ₹{{ gift.max_amount }}</div>
-                </div>
-                <div>
-                    <button class="btn-icon" style="background:#ff9800;" onclick="toggleGift('{{ gift.code }}')" title="Toggle Active">
-                        {% if gift.is_active %}⏸{% else %}▶{% endif %}
-                    </button>
-                    <button class="btn-icon cross" onclick="deleteGift('{{ gift.code }}')" title="Delete">✘</button>
+                <div class="table-responsive">
+                    <table id="withdrawalsTable">
+                        <thead>
+                            <tr>
+                                <th>TxID</th>
+                                <th>User</th>
+                                <th>Amount</th>
+                                <th>UPI</th>
+                                <th>Status</th>
+                                <th>Date</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for w in withdrawals %}
+                            <tr data-status="{{ w.status }}">
+                                <td><span class="badge badge-info">{{ w.tx_id }}</span></td>
+                                <td>{{ w.name }}<br><small>{{ w.user_id }}</small></td>
+                                <td><span class="badge {% if w.status == 'completed' %}badge-success{% elif w.status == 'pending' %}badge-warning{% else %}badge-danger{% endif %}">₹{{ w.amount }}</span></td>
+                                <td>{{ w.upi }}</td>
+                                <td>
+                                    <span class="badge {% if w.status == 'completed' %}badge-success{% elif w.status == 'pending' %}badge-warning{% else %}badge-danger{% endif %}">
+                                        {{ w.status|upper }}
+                                    </span>
+                                </td>
+                                <td>{{ w.created_at[:10] }}</td>
+                                <td>
+                                    {% if w.status == 'pending' %}
+                                    <button class="btn btn-sm btn-success" onclick="openApproveModal('{{ w.tx_id }}')"><i class="fas fa-check"></i></button>
+                                    <button class="btn btn-sm btn-danger" onclick="rejectWithdrawal('{{ w.tx_id }}')"><i class="fas fa-times"></i></button>
+                                    {% elif w.status == 'completed' %}
+                                    <span class="badge badge-success">{{ w.utr }}</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="7" style="text-align: center; padding: 30px; color: #aaa;">
+                                    <i class="fas fa-inbox" style="font-size: 40px; margin-bottom: 10px; display: block;"></i>
+                                    No withdrawals found
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
             </div>
-            {% else %}
-            <div style="text-align:center; color:#888; padding:20px;">No gift codes created</div>
-            {% endfor %}
+        </div>
+        
+        <!-- Users Tab -->
+        <div id="tab-users" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-users"></i> Users Management</h2>
+                    <div class="search-box" style="width: 300px;">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="userSearch" placeholder="Search users..." onkeyup="searchUsers()">
+                    </div>
+                </div>
+                <div id="usersList">
+                    {% for user in users %}
+                    <div class="user-item" onclick="openUserModal('{{ user.user_id }}', '{{ user.name }}', '{{ user.username }}', {{ user.balance }}, {{ user.verified }}, {{ user.device_verified }}, '{{ user.refer_code }}', {{ user.referred_users|length }})">
+                        <div class="user-header">
+                            <div>
+                                <span class="user-name">{{ user.name }}</span>
+                                {% if user.username %}
+                                <span style="color: #aaa; font-size: 12px;"> @{{ user.username }}</span>
+                                {% endif %}
+                            </div>
+                            <span class="user-balance">₹{{ "%.2f"|format(user.balance) }}</span>
+                        </div>
+                        <div class="user-stats">
+                            <span><i class="fas fa-id-card"></i> {{ user.user_id[:8] }}...</span>
+                            <span><i class="fas fa-code"></i> {{ user.refer_code }}</span>
+                            <span><i class="fas fa-users"></i> {{ user.referred_users|length }} refers</span>
+                            <span>
+                                {% if user.verified %}
+                                <span class="badge badge-success"><i class="fas fa-check-circle"></i> Verified</span>
+                                {% else %}
+                                <span class="badge badge-warning"><i class="fas fa-clock"></i> Pending</span>
+                                {% endif %}
+                            </span>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div style="text-align: center; padding: 50px; color: #aaa;">
+                        <i class="fas fa-users" style="font-size: 50px; margin-bottom: 15px; display: block;"></i>
+                        No users found
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Channels Tab -->
+        <div id="tab-channels" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-plus-circle"></i> Add New Channel</h2>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Channel Name</label>
+                        <input type="text" id="channelName" class="form-control" placeholder="e.g., News Channel">
+                    </div>
+                    <div class="form-group">
+                        <label>Channel Link</label>
+                        <input type="text" id="channelLink" class="form-control" placeholder="https://t.me/...">
+                    </div>
+                    <div class="form-group">
+                        <label>Channel ID</label>
+                        <input type="text" id="channelId" class="form-control" placeholder="@channel or -100...">
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="addChannel()"><i class="fas fa-plus"></i> Add Channel</button>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-list"></i> Current Channels</h2>
+                </div>
+                <div id="channelsList">
+                    {% for ch in settings.channels %}
+                    <div class="channel-item">
+                        <div class="channel-info">
+                            <h4>{{ ch.btn_name }}</h4>
+                            <p><i class="fas fa-link"></i> {{ ch.link[:50] }}{% if ch.link|length > 50 %}...{% endif %}</p>
+                            <p><i class="fas fa-id-card"></i> {{ ch.id }}</p>
+                            {% if ch.disabled %}
+                            <span class="badge badge-danger">Disabled</span>
+                            {% else %}
+                            <span class="badge badge-success">Active</span>
+                            {% endif %}
+                        </div>
+                        <div class="channel-actions">
+                            <button class="btn btn-sm btn-warning" onclick="toggleChannel({{ loop.index0 }})">
+                                <i class="fas {% if ch.disabled %}fa-play{% else %}fa-pause{% endif %}"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteChannel({{ loop.index0 }})">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div style="text-align: center; padding: 30px; color: #aaa;">
+                        <i class="fas fa-tv" style="font-size: 40px; margin-bottom: 10px; display: block;"></i>
+                        No channels added yet
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Gift Codes Tab -->
+        <div id="tab-gifts" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-gift"></i> Create Gift Code</h2>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Gift Code</label>
+                        <div style="display: flex; gap: 10px;">
+                            <input type="text" id="giftCode" class="form-control" placeholder="5-digit code" maxlength="5" style="text-transform: uppercase;">
+                            <button class="btn btn-info" onclick="generateCode()"><i class="fas fa-random"></i> Generate</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Amount (₹)</label>
+                        <input type="number" id="giftMin" class="form-control" value="10" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Amount (₹)</label>
+                        <input type="number" id="giftMax" class="form-control" value="50" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label>Expiry (Hours)</label>
+                        <input type="number" id="giftExpiry" class="form-control" value="24">
+                    </div>
+                    <div class="form-group">
+                        <label>Total Uses</label>
+                        <input type="number" id="giftUses" class="form-control" value="1">
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="createGift()"><i class="fas fa-plus"></i> Create Gift Code</button>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-list"></i> Active Gift Codes</h2>
+                </div>
+                <div id="giftsList">
+                    {% for gift in gifts %}
+                    <div class="gift-item {% if gift.expired %}gift-expired{% endif %}">
+                        <div>
+                            <div class="gift-code">{{ gift.code }}</div>
+                            <div class="gift-details">
+                                <span><i class="fas fa-rupee-sign"></i> ₹{{ gift.min_amount }} - ₹{{ gift.max_amount }}</span>
+                                <span><i class="fas fa-clock"></i> Expires: {{ gift.expiry[:10] }}</span>
+                                <span><i class="fas fa-users"></i> {{ gift.used_by|length }}/{{ gift.total_uses }} uses</span>
+                            </div>
+                        </div>
+                        <div>
+                            <button class="btn btn-sm btn-warning" onclick="toggleGift('{{ gift.code }}')">
+                                <i class="fas {% if gift.is_active %}fa-pause{% else %}fa-play{% endif %}"></i>
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteGift('{{ gift.code }}')">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div style="text-align: center; padding: 30px; color: #aaa;">
+                        <i class="fas fa-gift" style="font-size: 40px; margin-bottom: 10px; display: block;"></i>
+                        No gift codes created yet
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Settings Tab -->
+        <div id="tab-settings" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-cog"></i> Bot Settings</h2>
+                </div>
+                <div class="form-group">
+                    <label>Bot Name</label>
+                    <input type="text" id="botName" class="form-control" value="{{ settings.bot_name }}">
+                </div>
+                <div class="form-group">
+                    <label>App Display Name</label>
+                    <input type="text" id="appName" class="form-control" value="{{ settings.app_name }}">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Withdrawal (₹)</label>
+                        <input type="number" id="minWithdrawal" class="form-control" value="{{ settings.min_withdrawal }}" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label>Welcome Bonus (₹)</label>
+                        <input type="number" id="welcomeBonus" class="form-control" value="{{ settings.welcome_bonus }}" step="0.01">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Refer Reward (₹)</label>
+                        <input type="number" id="minRefer" class="form-control" value="{{ settings.min_refer_reward }}" step="0.01">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Refer Reward (₹)</label>
+                        <input type="number" id="maxRefer" class="form-control" value="{{ settings.max_refer_reward }}" step="0.01">
+                    </div>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Disable Bot for Users</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="botsDisabled" {% if settings.bots_disabled %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Auto Withdraw (Instant Payment)</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="autoWithdraw" {% if settings.auto_withdraw %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Ignore Device Check (Allow multiple accounts)</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ignoreDevice" {% if settings.ignore_device_check %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Disable Withdrawals</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="withdrawDisabled" {% if settings.withdraw_disabled %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Disable Channel Verification</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="disableChannelVerification" {% if settings.disable_channel_verification %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Auto Accept Private Channels</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="autoAcceptPrivate" {% if settings.auto_accept_private %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Hide Verify Button in App</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="hideVerifyButton" {% if settings.hide_verify_button %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <button class="btn btn-primary" onclick="saveSettings()"><i class="fas fa-save"></i> Save Settings</button>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-image"></i> Upload Logo</h2>
+                </div>
+                <div class="form-group">
+                    <label>Select Logo Image</label>
+                    <input type="file" id="logoFile" class="form-control" accept="image/*">
+                </div>
+                <button class="btn btn-primary" onclick="uploadLogo()"><i class="fas fa-upload"></i> Upload Logo</button>
+                <p style="color: #aaa; margin-top: 10px; font-size: 12px;">Current: {{ settings.logo_filename }}</p>
+            </div>
+        </div>
+        
+        <!-- UPI Settings Tab -->
+        <div id="tab-upi" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-credit-card"></i> UPI Payment Settings</h2>
+                </div>
+                
+                <div class="toggle-label">
+                    <span>Enable UPI Payments</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="upiEnabled" {% if settings.upi_enabled %}checked{% endif %}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                
+                <div class="form-group">
+                    <label>Payment Mode</label>
+                    <select id="upiMode" class="form-control">
+                        <option value="manual" {% if settings.upi_mode == 'manual' %}selected{% endif %}>Manual (Admin Approval)</option>
+                        <option value="auto" {% if settings.upi_mode == 'auto' %}selected{% endif %}>Auto (API Payment)</option>
+                        <option value="fake" {% if settings.upi_mode == 'fake' %}selected{% endif %}>Fake (Test Mode)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>API Token</label>
+                    <input type="text" id="upiToken" class="form-control" value="{{ settings.upi_token }}">
+                </div>
+                
+                <div class="form-group">
+                    <label>API Key</label>
+                    <input type="text" id="upiKey" class="form-control" value="{{ settings.upi_key }}">
+                </div>
+                
+                <div class="form-group">
+                    <label>Receiver UPI ID</label>
+                    <input type="text" id="upiReceiver" class="form-control" value="{{ settings.upi_receiver }}" placeholder="receiver@upi">
+                </div>
+                
+                <div class="form-group">
+                    <label>API URL</label>
+                    <input type="text" id="upiApiUrl" class="form-control" value="{{ settings.upi_api_url }}">
+                </div>
+                
+                <button class="btn btn-info" onclick="checkUPIBalance()"><i class="fas fa-wallet"></i> Check Balance</button>
+                <button class="btn btn-primary" onclick="saveUPISettings()"><i class="fas fa-save"></i> Save UPI Settings</button>
+                
+                <div id="balanceInfo" style="margin-top: 20px; padding: 15px; background: #353535; border-radius: 8px; display: none;">
+                    <h3><i class="fas fa-info-circle"></i> Balance Info</h3>
+                    <p id="balanceAmount" style="font-size: 24px; color: #4CAF50;">₹0.00</p>
+                    <p id="balanceStatus"></p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Broadcast Tab -->
+        <div id="tab-broadcast" class="tab">
+            <div class="card">
+                <div class="card-header">
+                    <h2><i class="fas fa-broadcast-tower"></i> Send Broadcast</h2>
+                </div>
+                <div class="form-group">
+                    <label>Message</label>
+                    <textarea id="broadcastMessage" class="form-control" rows="5" placeholder="Enter your message..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Image (Optional)</label>
+                    <input type="file" id="broadcastImage" class="form-control" accept="image/*">
+                </div>
+                <button class="btn btn-primary" onclick="sendBroadcast()"><i class="fas fa-paper-plane"></i> Send to All Users ({{ stats.total_users }})</button>
+            </div>
         </div>
     </div>
     
-    <div id="bc" class="tab">
-        <div class="card">
-            <h3>Broadcast Message</h3>
-            <textarea id="bcMsg" placeholder="Enter message to send to all users" rows="5"></textarea>
-            <input type="file" id="bcFile" accept="image/*">
-            <button class="btn" onclick="sendBC()">Broadcast to All Users</button>
-            <p style="font-size:12px; color:#888; margin-top:10px;">This will send to {{ stats.total_users }} users</p>
+    <!-- Approve Modal -->
+    <div id="approveModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-check-circle"></i> Approve Withdrawal</h3>
+                <button class="modal-close" onclick="closeModal('approveModal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>UTR Number</label>
+                <input type="text" id="utrNumber" class="form-control" placeholder="Enter UTR/Transaction ID">
+            </div>
+            <button class="btn btn-success" onclick="approveWithdrawal()"><i class="fas fa-check"></i> Approve Payment</button>
+            <button class="btn btn-danger" onclick="closeModal('approveModal')" style="margin-top: 10px;">Cancel</button>
+        </div>
+    </div>
+    
+    <!-- User Message Modal -->
+    <div id="userModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-user"></i> Send Message to User</h3>
+                <button class="modal-close" onclick="closeModal('userModal')">&times;</button>
+            </div>
+            <div id="userInfo" style="background: #353535; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                <!-- User info will be inserted here -->
+            </div>
+            <div class="form-group">
+                <label>Message</label>
+                <textarea id="userMessage" class="form-control" rows="4" placeholder="Type your message..."></textarea>
+            </div>
+            <div class="form-group">
+                <label>Image (Optional)</label>
+                <input type="file" id="userImage" class="form-control" accept="image/*">
+            </div>
+            <button class="btn btn-primary" onclick="sendUserMessage()"><i class="fas fa-paper-plane"></i> Send Message</button>
+            <button class="btn btn-danger" onclick="closeModal('userModal')" style="margin-top: 10px;">Cancel</button>
         </div>
     </div>
     
     <script>
-        let curTx = '';
-        let selectedUserId = '';
+        // Current state
+        let currentTxId = '';
+        let currentUserId = '';
         
-        function showAdminLoader(text = 'Processing...') {
-            document.getElementById('adminLoaderText').textContent = text;
-            document.getElementById('adminLoader').style.display = 'flex';
-        }
-        
-        function hideAdminLoader() {
-            document.getElementById('adminLoader').style.display = 'none';
-        }
-        
-        function tab(n) {
-            document.querySelectorAll('.tab').forEach(e => e.classList.remove('active'));
-            document.getElementById(n).classList.add('active');
-            document.querySelectorAll('.nav button').forEach(e => e.classList.remove('active'));
-            event.target.classList.add('active');
-        }
-        
-        function openUserMessage(userId, userName, username, balance, verified, deviceVerified, referCode, referCount) {
-            selectedUserId = userId;
-            const userInfo = document.getElementById('sendToUserInfo');
-            userInfo.innerHTML = `
-                <div><strong>User ID:</strong> ${userId}</div>
-                <div><strong>Name:</strong> ${userName} ${username ? '(@' + username + ')' : ''}</div>
-                <div><strong>Balance:</strong> ₹${balance.toFixed(2)}</div>
-                <div><strong>Status:</strong> ${verified && deviceVerified ? '✅ Verified' : '⏳ Pending'}</div>
-                <div><strong>Refer Code:</strong> ${referCode} (${referCount} refers)</div>
-            `;
-            document.getElementById('userMessage').value = '';
-            document.getElementById('userImage').value = '';
-            document.getElementById('sendMessageModal').style.display = 'flex';
-        }
-        
-        function sendUserMessage() {
-            const message = document.getElementById('userMessage').value;
-            const fileInput = document.getElementById('userImage');
+        // Tab switching
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
             
-            if (!message.trim()) {
-                alert('Please enter a message');
+            document.getElementById('tab-' + tabName).classList.add('active');
+            event.target.closest('.nav-btn').classList.add('active');
+        }
+        
+        // Loader functions
+        function showLoader(text = 'Processing...') {
+            document.getElementById('loaderText').textContent = text;
+            document.getElementById('loader').classList.add('active');
+        }
+        
+        function hideLoader() {
+            document.getElementById('loader').classList.remove('active');
+        }
+        
+        // Toast functions
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            
+            toast.className = 'toast ' + type;
+            toastMessage.textContent = message;
+            toast.classList.add('show');
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+        
+        // Modal functions
+        function openModal(modalId) {
+            document.getElementById(modalId).classList.add('active');
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('active');
+        }
+        
+        // Withdrawal functions
+        function openApproveModal(txId) {
+            currentTxId = txId;
+            document.getElementById('utrNumber').value = '';
+            openModal('approveModal');
+        }
+        
+        function approveWithdrawal() {
+            const utr = document.getElementById('utrNumber').value.trim();
+            if (!utr) {
+                showToast('Please enter UTR number', 'error');
                 return;
             }
             
-            showAdminLoader('Sending message...');
+            showLoader('Processing approval...');
+            
+            fetch('/admin/process_withdrawal', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    tx_id: currentTxId,
+                    action: 'approve',
+                    utr: utr
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                closeModal('approveModal');
+                if (data.ok) {
+                    showToast('Withdrawal approved successfully!');
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    showToast(data.msg || 'Error approving withdrawal', 'error');
+                }
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        function rejectWithdrawal(txId) {
+            if (!confirm('Are you sure you want to reject this withdrawal?')) return;
+            
+            showLoader('Rejecting withdrawal...');
+            
+            fetch('/admin/process_withdrawal', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    tx_id: txId,
+                    action: 'reject'
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                if (data.ok) {
+                    showToast('Withdrawal rejected and refunded');
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    showToast(data.msg || 'Error rejecting withdrawal', 'error');
+                }
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        function filterWithdrawals() {
+            const filter = document.getElementById('withdrawFilter').value;
+            const rows = document.querySelectorAll('#withdrawalsTable tbody tr');
+            
+            rows.forEach(row => {
+                if (filter === 'all' || row.dataset.status === filter) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+        
+        // User functions
+        function openUserModal(userId, name, username, balance, verified, deviceVerified, referCode, referCount) {
+            currentUserId = userId;
+            
+            const userInfo = document.getElementById('userInfo');
+            userInfo.innerHTML = `
+                <p><strong>ID:</strong> ${userId}</p>
+                <p><strong>Name:</strong> ${name} ${username ? '(@' + username + ')' : ''}</p>
+                <p><strong>Balance:</strong> ₹${balance.toFixed(2)}</p>
+                <p><strong>Status:</strong> ${verified ? '✅ Verified' : '⏳ Pending'}</p>
+                <p><strong>Device:</strong> ${deviceVerified ? '✅ Verified' : '❌ Not Verified'}</p>
+                <p><strong>Refer Code:</strong> ${referCode}</p>
+                <p><strong>Referrals:</strong> ${referCount}</p>
+            `;
+            
+            document.getElementById('userMessage').value = '';
+            document.getElementById('userImage').value = '';
+            
+            openModal('userModal');
+        }
+        
+        function sendUserMessage() {
+            const message = document.getElementById('userMessage').value.trim();
+            const image = document.getElementById('userImage').files[0];
+            
+            if (!message) {
+                showToast('Please enter a message', 'error');
+                return;
+            }
+            
+            showLoader('Sending message...');
             
             const formData = new FormData();
-            formData.append('user_id', selectedUserId);
-            formData.append('text', message);
-            if (fileInput.files[0]) {
-                formData.append('image', fileInput.files[0]);
+            formData.append('user_id', currentUserId);
+            formData.append('message', message);
+            if (image) {
+                formData.append('image', image);
             }
             
             fetch('/admin/send_to_user', {
@@ -2703,327 +5232,128 @@ ADMIN_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
+                closeModal('userModal');
                 if (data.ok) {
-                    alert(data.msg);
-                    document.getElementById('sendMessageModal').style.display = 'none';
+                    showToast('Message sent successfully!');
                 } else {
-                    alert('Error: ' + data.msg);
+                    showToast(data.msg || 'Error sending message', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error sending message');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
-        function searchUsers(input) {
-            const value = input.value.toLowerCase();
-            const cards = document.querySelectorAll('.user-card');
+        function searchUsers() {
+            const search = document.getElementById('userSearch').value.toLowerCase();
+            const users = document.querySelectorAll('.user-item');
             
-            cards.forEach(card => {
-                const text = card.textContent.toLowerCase();
-                card.style.display = text.includes(value) ? '' : 'none';
-            });
-        }
-        
-        function saveBasic() {
-            showAdminLoader('Saving settings...');
-            const data = {
-                bot_name: document.getElementById('bName').value,
-                app_name: document.getElementById('appName').value,
-                min_withdrawal: parseFloat(document.getElementById('minW').value),
-                welcome_bonus: parseFloat(document.getElementById('bonus').value),
-                min_refer_reward: parseFloat(document.getElementById('minRef').value),
-                max_refer_reward: parseFloat(document.getElementById('maxRef').value),
-                bots_disabled: document.getElementById('dis').checked,
-                auto_withdraw: document.getElementById('auto').checked,
-                ignore_device_check: document.getElementById('idevice').checked,
-                withdraw_disabled: document.getElementById('withdraw_disabled').checked,
-                disable_channel_verification: document.getElementById('disable_channel_verification').checked,
-                auto_accept_private: document.getElementById('auto_accept_private').checked,
-                hide_verify_button: document.getElementById('hide_verify_button').checked
-            };
-            
-            fetch('/admin/update_basic', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideAdminLoader();
-                if (data.ok) {
-                    alert('Settings saved successfully!');
+            users.forEach(user => {
+                const text = user.textContent.toLowerCase();
+                if (text.includes(search)) {
+                    user.style.display = '';
                 } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
+                    user.style.display = 'none';
                 }
-            })
-            .catch(err => {
-                hideAdminLoader();
-                alert('Error saving settings');
-                console.error(err);
             });
         }
         
-        function addChan() {
-            showAdminLoader('Adding channel...');
-            const data = {
-                action: 'add',
-                name: document.getElementById('cName').value,
-                link: document.getElementById('cLink').value,
-                id: document.getElementById('cId').value
-            };
+        // Channel functions
+        function addChannel() {
+            const name = document.getElementById('channelName').value.trim();
+            const link = document.getElementById('channelLink').value.trim();
+            const id = document.getElementById('channelId').value.trim();
             
-            if (!data.name || !data.link || !data.id) {
-                hideAdminLoader();
-                alert('Please fill all channel details');
+            if (!name || !link || !id) {
+                showToast('Please fill all fields', 'error');
                 return;
             }
+            
+            showLoader('Adding channel...');
             
             fetch('/admin/channels', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
+                body: JSON.stringify({
+                    action: 'add',
+                    name: name,
+                    link: link,
+                    id: id
+                })
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
                 if (data.ok) {
-                    location.reload();
+                    showToast('Channel added successfully!');
+                    setTimeout(() => location.reload(), 1000);
                 } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
+                    showToast(data.msg || 'Error adding channel', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error adding channel');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
         function toggleChannel(index) {
-            showAdminLoader('Toggling channel...');
+            showLoader('Toggling channel...');
             
             fetch('/admin/channels', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: 'toggle', index: index})
+                body: JSON.stringify({
+                    action: 'toggle',
+                    index: index
+                })
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
-                    alert('Error toggling channel');
+                    showToast(data.msg || 'Error toggling channel', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error toggling channel');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
-        function delChan(index) {
-            if (!confirm('Delete this channel?')) return;
+        function deleteChannel(index) {
+            if (!confirm('Are you sure you want to delete this channel?')) return;
             
-            showAdminLoader('Deleting channel...');
+            showLoader('Deleting channel...');
             
             fetch('/admin/channels', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: 'delete', index: index})
+                body: JSON.stringify({
+                    action: 'delete',
+                    index: index
+                })
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
                 if (data.ok) {
                     location.reload();
                 } else {
-                    alert('Error deleting channel');
+                    showToast(data.msg || 'Error deleting channel', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error deleting channel');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
-        function addAdmin() {
-            showAdminLoader('Adding admin...');
-            const adminId = document.getElementById('newAdmin').value.trim();
-            if (!adminId) {
-                hideAdminLoader();
-                alert('Please enter Telegram User ID');
-                return;
-            }
-            
-            fetch('/admin/manage_admins', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: 'add', id: adminId})
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideAdminLoader();
-                if (data.ok) {
-                    location.reload();
-                } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
-                }
-            })
-            .catch(err => {
-                hideAdminLoader();
-                alert('Error adding admin');
-                console.error(err);
-            });
-        }
-        
-        function remAdmin(id) {
-            if (!confirm('Remove this admin?')) return;
-            
-            showAdminLoader('Removing admin...');
-            
-            fetch('/admin/manage_admins', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: 'remove', id: id})
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideAdminLoader();
-                if (data.ok) {
-                    location.reload();
-                } else {
-                    alert('Error removing admin');
-                }
-            })
-            .catch(err => {
-                hideAdminLoader();
-                alert('Error removing admin');
-                console.error(err);
-            });
-        }
-        
-        function openApprove(id) {
-            curTx = id;
-            document.getElementById('approveModal').style.display = 'flex';
-            document.getElementById('utrInput').focus();
-        }
-        
-        function confirmApprove() {
-            const utr = document.getElementById('utrInput').value.trim();
-            if (!utr) {
-                alert('Please enter UTR number');
-                return;
-            }
-            
-            showAdminLoader('Processing payment...');
-            proc(curTx, 'completed', utr);
-            document.getElementById('approveModal').style.display = 'none';
-            document.getElementById('utrInput').value = '';
-        }
-        
-        function proc(txId, status, utr = '') {
-            showAdminLoader(status === 'completed' ? 'Processing payment...' : 'Rejecting withdrawal...');
-            fetch('/admin/process_withdraw', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({tx_id: txId, status: status, utr: utr})
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideAdminLoader();
-                if (data.ok) {
-                    location.reload();
-                } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
-                }
-            })
-            .catch(err => {
-                hideAdminLoader();
-                alert('Error processing withdrawal');
-                console.error(err);
-            });
-        }
-        
-        function sendBC() {
-            const message = document.getElementById('bcMsg').value;
-            if (!message.trim()) {
-                alert('Please enter a message');
-                return;
-            }
-            
-            if (!confirm(`Send this message to {{ stats.total_users }} users?`)) return;
-            
-            showAdminLoader('Broadcasting message...');
-            
-            const formData = new FormData();
-            formData.append('text', message);
-            const fileInput = document.getElementById('bcFile');
-            if (fileInput.files[0]) {
-                formData.append('image', fileInput.files[0]);
-            }
-            
-            fetch('/admin/broadcast', {
-                method: 'POST',
-                body: formData
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideAdminLoader();
-                if (data.ok !== false) {
-                    alert(`Message sent to ${data.count || data} users!`);
-                    document.getElementById('bcMsg').value = '';
-                    document.getElementById('bcFile').value = '';
-                } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
-                }
-            })
-            .catch(err => {
-                hideAdminLoader();
-                alert('Error broadcasting message');
-                console.error(err);
-            });
-        }
-        
-        function upLogo() {
-            const fileInput = document.getElementById('logoFile');
-            if (!fileInput.files[0]) {
-                alert('Please select a logo file');
-                return;
-            }
-            
-            showAdminLoader('Uploading logo...');
-            
-            const formData = new FormData();
-            formData.append('logo', fileInput.files[0]);
-            
-            fetch('/admin/upload_logo', {
-                method: 'POST',
-                body: formData
-            })
-            .then(r => r.json())
-            .then(data => {
-                hideAdminLoader();
-                if (data.ok) {
-                    alert('Logo uploaded successfully!');
-                    fileInput.value = '';
-                } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
-                }
-            })
-            .catch(err => {
-                hideAdminLoader();
-                alert('Error uploading logo');
-                console.error(err);
-            });
-        }
-        
+        // Gift code functions
         function generateCode() {
             const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
             let code = '';
@@ -3034,114 +5364,316 @@ ADMIN_TEMPLATE = """
         }
         
         function createGift() {
-            showAdminLoader('Creating gift code...');
-            const code = document.getElementById('giftCode').value.toUpperCase();
-            const minAmt = document.getElementById('giftMin').value;
-            const maxAmt = document.getElementById('giftMax').value;
-            const expiry = document.getElementById('giftExpiry').value;
-            const uses = document.getElementById('giftUses').value;
+            const code = document.getElementById('giftCode').value.trim().toUpperCase();
+            const minAmt = parseFloat(document.getElementById('giftMin').value);
+            const maxAmt = parseFloat(document.getElementById('giftMax').value);
+            const expiry = parseInt(document.getElementById('giftExpiry').value);
+            const uses = parseInt(document.getElementById('giftUses').value);
             
             if (!code || code.length !== 5) {
-                hideAdminLoader();
-                alert('Please enter a valid 5-character code');
+                showToast('Please enter a valid 5-character code', 'error');
                 return;
             }
             
-            if (parseFloat(minAmt) >= parseFloat(maxAmt)) {
-                hideAdminLoader();
-                alert('Max amount must be greater than min amount');
+            if (minAmt >= maxAmt) {
+                showToast('Max amount must be greater than min amount', 'error');
                 return;
             }
             
+            showLoader('Creating gift code...');
+            
+            fetch('/admin/create_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    code: code,
+                    min_amount: minAmt,
+                    max_amount: maxAmt,
+                    expiry_hours: expiry,
+                    total_uses: uses
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                if (data.ok) {
+                    showToast('Gift code created: ' + data.code);
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    showToast(data.msg || 'Error creating gift code', 'error');
+                }
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        function toggleGift(code) {
+            showLoader('Toggling gift code...');
+            
+            fetch('/admin/toggle_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    code: code,
+                    action: 'toggle'
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    showToast(data.msg || 'Error toggling gift code', 'error');
+                }
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        function deleteGift(code) {
+            if (!confirm('Are you sure you want to delete this gift code?')) return;
+            
+            showLoader('Deleting gift code...');
+            
+            fetch('/admin/toggle_gift', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    code: code,
+                    action: 'delete'
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                if (data.ok) {
+                    location.reload();
+                } else {
+                    showToast(data.msg || 'Error deleting gift code', 'error');
+                }
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        // Settings functions
+        function saveSettings() {
             const data = {
-                auto_generate: false,
-                code: code,
-                min_amount: minAmt,
-                max_amount: maxAmt,
-                expiry_hours: expiry,
-                total_uses: uses
+                bot_name: document.getElementById('botName').value,
+                app_name: document.getElementById('appName').value,
+                min_withdrawal: parseFloat(document.getElementById('minWithdrawal').value),
+                welcome_bonus: parseFloat(document.getElementById('welcomeBonus').value),
+                min_refer_reward: parseFloat(document.getElementById('minRefer').value),
+                max_refer_reward: parseFloat(document.getElementById('maxRefer').value),
+                bots_disabled: document.getElementById('botsDisabled').checked,
+                auto_withdraw: document.getElementById('autoWithdraw').checked,
+                ignore_device_check: document.getElementById('ignoreDevice').checked,
+                withdraw_disabled: document.getElementById('withdrawDisabled').checked,
+                disable_channel_verification: document.getElementById('disableChannelVerification').checked,
+                auto_accept_private: document.getElementById('autoAcceptPrivate').checked,
+                hide_verify_button: document.getElementById('hideVerifyButton').checked
             };
             
-            fetch('/admin/create_gift?user_id={{ admin_id }}', {
+            showLoader('Saving settings...');
+            
+            fetch('/admin/update_settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data)
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
                 if (data.ok) {
-                    alert('Gift code created: ' + data.code);
-                    location.reload();
+                    showToast('Settings saved successfully!');
                 } else {
-                    alert('Error: ' + data.msg);
+                    showToast(data.msg || 'Error saving settings', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error creating gift code');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
-        function toggleGift(code) {
-            showAdminLoader('Toggling gift code...');
-            fetch('/admin/toggle_gift', {
+        function uploadLogo() {
+            const file = document.getElementById('logoFile').files[0];
+            if (!file) {
+                showToast('Please select a file', 'error');
+                return;
+            }
+            
+            showLoader('Uploading logo...');
+            
+            const formData = new FormData();
+            formData.append('logo', file);
+            
+            fetch('/admin/upload_logo', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({code: code, action: 'toggle'})
+                body: formData
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
                 if (data.ok) {
-                    location.reload();
+                    showToast('Logo uploaded successfully!');
+                    setTimeout(() => location.reload(), 1000);
                 } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
+                    showToast(data.msg || 'Error uploading logo', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error toggling gift code');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
-        function deleteGift(code) {
-            if (!confirm('Delete this gift code?')) return;
+        // UPI functions
+        function saveUPISettings() {
+            const data = {
+                upi_enabled: document.getElementById('upiEnabled').checked,
+                upi_mode: document.getElementById('upiMode').value,
+                upi_token: document.getElementById('upiToken').value,
+                upi_key: document.getElementById('upiKey').value,
+                upi_receiver: document.getElementById('upiReceiver').value,
+                upi_api_url: document.getElementById('upiApiUrl').value
+            };
             
-            showAdminLoader('Deleting gift code...');
+            showLoader('Saving UPI settings...');
             
-            fetch('/admin/toggle_gift', {
+            fetch('/admin/update_upi_settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({code: code, action: 'delete'})
+                body: JSON.stringify(data)
             })
             .then(r => r.json())
             .then(data => {
-                hideAdminLoader();
+                hideLoader();
                 if (data.ok) {
-                    location.reload();
+                    showToast('UPI settings saved successfully!');
                 } else {
-                    alert('Error: ' + (data.msg || 'Unknown error'));
+                    showToast(data.msg || 'Error saving UPI settings', 'error');
                 }
             })
             .catch(err => {
-                hideAdminLoader();
-                alert('Error deleting gift code');
-                console.error(err);
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
             });
         }
         
-        // Generate initial code
-        generateCode();
+        function checkUPIBalance() {
+            showLoader('Checking balance...');
+            
+            fetch('/admin/check_upi_balance')
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                
+                const balanceInfo = document.getElementById('balanceInfo');
+                const balanceAmount = document.getElementById('balanceAmount');
+                const balanceStatus = document.getElementById('balanceStatus');
+                
+                if (data.status === 'success') {
+                    balanceAmount.textContent = '₹' + data.balance.toFixed(2);
+                    balanceStatus.textContent = 'Balance updated successfully';
+                    balanceStatus.style.color = '#4CAF50';
+                } else if (data.status === 'manual') {
+                    balanceAmount.textContent = 'N/A';
+                    balanceStatus.textContent = 'Manual mode - balance check not available';
+                    balanceStatus.style.color = '#ff9800';
+                } else {
+                    balanceAmount.textContent = 'Error';
+                    balanceStatus.textContent = data.message || 'Failed to check balance';
+                    balanceStatus.style.color = '#f44336';
+                }
+                
+                balanceInfo.style.display = 'block';
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        // Broadcast functions
+        function sendBroadcast() {
+            const message = document.getElementById('broadcastMessage').value.trim();
+            const image = document.getElementById('broadcastImage').files[0];
+            
+            if (!message) {
+                showToast('Please enter a message', 'error');
+                return;
+            }
+            
+            if (!confirm('Send this message to all users?')) return;
+            
+            showLoader('Sending broadcast...');
+            
+            const formData = new FormData();
+            formData.append('message', message);
+            if (image) {
+                formData.append('image', image);
+            }
+            
+            fetch('/admin/broadcast', {
+                method: 'POST',
+                body: formData
+            })
+            .then(r => r.json())
+            .then(data => {
+                hideLoader();
+                if (data.ok) {
+                    showToast(`Broadcast sent to ${data.sent}/${data.total} users`);
+                    document.getElementById('broadcastMessage').value = '';
+                    document.getElementById('broadcastImage').value = '';
+                } else {
+                    showToast(data.msg || 'Error sending broadcast', 'error');
+                }
+            })
+            .catch(err => {
+                hideLoader();
+                showToast('Error: ' + err.message, 'error');
+            });
+        }
+        
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.classList.remove('active');
+            }
+        }
+        
+        // Generate initial code on page load
+        window.onload = function() {
+            generateCode();
+        }
     </script>
 </body>
 </html>
 """
 
-# ==================== 10. START APP ====================
+# ==================== START APP ====================
 if __name__ == '__main__':
-    init_default_files()
+    # Create default logo if not exists
+    default_logo_path = os.path.join(STATIC_DIR, 'logo_default.png')
+    if not os.path.exists(default_logo_path):
+        # Create a simple default logo
+        from PIL import Image, ImageDraw
+        try:
+            img = Image.new('RGB', (512, 512), color=(124, 58, 237))
+            d = ImageDraw.Draw(img)
+            d.text((256, 256), "💰", fill=(255, 255, 255), anchor="mm")
+            img.save(default_logo_path)
+        except:
+            pass
+    
+    # Start Flask app
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
