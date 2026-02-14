@@ -28,7 +28,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 # ==================== CONFIGURATION ====================
 # Environment variables with defaults
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8280352331:AAGwEGmIKlPnFWBeFihp9mLxbgtM_qBpATc')
-ADMIN_IDS = [8469993808]  # Fixed admin ID
+ADMIN_IDS = [8469993808,8073884328]  # Fixed admin ID
 BASE_URL = os.environ.get('BASE_URL', 'web-production-3dfc9.up.railway.app')
 PORT = int(os.environ.get('PORT', 8080))
 
