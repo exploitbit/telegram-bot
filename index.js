@@ -122,6 +122,9 @@ async function connectDB() {
         
         await db.collection('settings').createIndex({ key: 1 }, { unique: true });
         
+        // Create giftClaims collection for tracking
+        await db.collection('giftClaims').createIndex({ userId: 1, giftCodeId: 1 }, { unique: true });
+        
         // Initialize settings
         await initializeSettings();
         
@@ -181,14 +184,6 @@ function generateReferCode() {
         code += chars[Math.floor(Math.random() * chars.length)];
     }
     return code;
-}
-
-function generateDeviceId(ctx) {
-    // For Telegram bot, use user ID + chat ID + timestamp to create a unique device ID
-    const userId = ctx.from.id;
-    const chatId = ctx.chat?.id || userId;
-    const timestamp = Date.now();
-    return crypto.createHash('sha256').update(`${userId}-${chatId}-${timestamp}`).digest('hex').substring(0, 32);
 }
 
 async function getSettings() {
@@ -1189,7 +1184,7 @@ function createEJSFiles() {
 
     fs.writeFileSync(path.join(viewsDir, 'index.ejs'), mainEJS);
 
-    // Advanced Admin Panel Template
+    // Advanced Admin Panel Template - COMPLETE VERSION
     const adminEJS = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1202,11 +1197,13 @@ function createEJSFiles() {
             --bg: #0f172a;
             --card: #1e293b;
             --text: #f8fafc;
+            --text-secondary: #cbd5e1;
             --border: #334155;
             --accent: #60a5fa;
             --success: #34d399;
             --warning: #fbbf24;
             --danger: #f87171;
+            --info: #60a5fa;
         }
         
         * {
@@ -1223,7 +1220,7 @@ function createEJSFiles() {
         }
         
         .container {
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
         }
         
@@ -1233,30 +1230,46 @@ function createEJSFiles() {
             align-items: center;
             margin-bottom: 30px;
             background: var(--card);
-            padding: 20px;
-            border-radius: 12px;
+            padding: 20px 30px;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+        }
+        
+        .header h1 {
+            font-size: 1.8rem;
+            background: linear-gradient(135deg, #60a5fa, #34d399);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
         
         .nav-tabs {
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
-            margin-bottom: 20px;
+            margin-bottom: 30px;
             background: var(--card);
             padding: 15px;
-            border-radius: 12px;
+            border-radius: 50px;
+            border: 1px solid var(--border);
         }
         
         .nav-tab {
             padding: 12px 24px;
-            border-radius: 8px;
+            border-radius: 40px;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.3s;
             background: var(--bg);
+            color: var(--text-secondary);
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
         
         .nav-tab:hover {
             background: var(--border);
+            color: var(--text);
+            transform: translateY(-2px);
         }
         
         .nav-tab.active {
@@ -1266,47 +1279,76 @@ function createEJSFiles() {
         
         .tab-content {
             display: none;
+            animation: fadeIn 0.3s;
         }
         
         .tab-content.active {
             display: block;
         }
         
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
         .cards-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
             margin-bottom: 30px;
         }
         
         .stat-card {
             background: var(--card);
-            border-radius: 12px;
+            border-radius: 20px;
             padding: 25px;
             border: 1px solid var(--border);
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(96, 165, 250, 0.2);
+            border-color: var(--accent);
+        }
+        
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--accent), var(--success));
         }
         
         .stat-icon {
-            font-size: 2rem;
+            font-size: 2.5rem;
             color: var(--accent);
-            margin-bottom: 10px;
+            margin-bottom: 15px;
         }
         
         .stat-label {
             color: var(--text-secondary);
-            font-size: 0.9rem;
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
         
         .stat-value {
-            font-size: 2rem;
+            font-size: 2.5rem;
             font-weight: 700;
             margin-top: 10px;
+            color: var(--text);
         }
         
         .table-container {
             background: var(--card);
-            border-radius: 12px;
-            padding: 20px;
+            border-radius: 20px;
+            padding: 25px;
+            border: 1px solid var(--border);
             overflow-x: auto;
         }
         
@@ -1320,6 +1362,8 @@ function createEJSFiles() {
             padding: 15px;
             text-align: left;
             font-weight: 600;
+            color: var(--text-secondary);
+            border-radius: 12px 12px 0 0;
         }
         
         td {
@@ -1332,17 +1376,21 @@ function createEJSFiles() {
         }
         
         .btn {
-            padding: 8px 16px;
-            border-radius: 6px;
+            padding: 10px 20px;
+            border-radius: 12px;
             border: none;
             cursor: pointer;
             font-weight: 600;
-            transition: all 0.2s;
+            transition: all 0.3s;
             margin: 2px;
+            font-size: 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
         
         .btn-sm {
-            padding: 5px 10px;
+            padding: 8px 16px;
             font-size: 0.85rem;
         }
         
@@ -1351,9 +1399,21 @@ function createEJSFiles() {
             color: white;
         }
         
+        .btn-primary:hover {
+            background: #3b82f6;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(96, 165, 250, 0.4);
+        }
+        
         .btn-success {
             background: var(--success);
             color: white;
+        }
+        
+        .btn-success:hover {
+            background: #10b981;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(52, 211, 153, 0.4);
         }
         
         .btn-danger {
@@ -1361,9 +1421,21 @@ function createEJSFiles() {
             color: white;
         }
         
+        .btn-danger:hover {
+            background: #ef4444;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(248, 113, 113, 0.4);
+        }
+        
         .btn-warning {
             background: var(--warning);
             color: black;
+        }
+        
+        .btn-warning:hover {
+            background: #f59e0b;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(251, 191, 36, 0.4);
         }
         
         .form-group {
@@ -1372,23 +1444,33 @@ function createEJSFiles() {
         
         .form-control {
             width: 100%;
-            padding: 12px;
-            border-radius: 8px;
+            padding: 14px;
+            border-radius: 12px;
             border: 1px solid var(--border);
             background: var(--bg);
             color: var(--text);
             font-size: 1rem;
+            transition: all 0.3s;
         }
         
         .form-control:focus {
-            outline: 2px solid var(--accent);
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-weight: 500;
         }
         
         .toggle-switch {
             position: relative;
             display: inline-block;
-            width: 60px;
-            height: 34px;
+            width: 70px;
+            height: 36px;
         }
         
         .toggle-switch input {
@@ -1406,14 +1488,14 @@ function createEJSFiles() {
             bottom: 0;
             background-color: var(--border);
             transition: .4s;
-            border-radius: 34px;
+            border-radius: 36px;
         }
         
         .toggle-slider:before {
             position: absolute;
             content: "";
-            height: 26px;
-            width: 26px;
+            height: 28px;
+            width: 28px;
             left: 4px;
             bottom: 4px;
             background-color: white;
@@ -1426,7 +1508,7 @@ function createEJSFiles() {
         }
         
         input:checked + .toggle-slider:before {
-            transform: translateX(26px);
+            transform: translateX(34px);
         }
         
         .modal {
@@ -1440,72 +1522,170 @@ function createEJSFiles() {
             align-items: center;
             justify-content: center;
             z-index: 1000;
+            backdrop-filter: blur(5px);
         }
         
         .modal-content {
             background: var(--card);
-            border-radius: 12px;
-            padding: 30px;
+            border-radius: 24px;
+            padding: 35px;
             max-width: 600px;
             width: 90%;
             max-height: 90vh;
             overflow-y: auto;
+            border: 1px solid var(--border);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
         }
         
         .modal-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
+        }
+        
+        .modal-header h3 {
+            font-size: 1.5rem;
+            color: var(--accent);
         }
         
         .close-btn {
             background: none;
             border: none;
             color: var(--text);
-            font-size: 1.5rem;
+            font-size: 2rem;
             cursor: pointer;
+            transition: all 0.3s;
         }
         
-        .item-list {
-            margin-top: 20px;
-        }
-        
-        .item-card {
-            background: var(--bg);
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+        .close-btn:hover {
+            color: var(--danger);
+            transform: rotate(90deg);
         }
         
         .badge {
             background: var(--accent);
             color: white;
-            padding: 3px 8px;
-            border-radius: 4px;
+            padding: 4px 12px;
+            border-radius: 20px;
             font-size: 0.8rem;
+            font-weight: 600;
+        }
+        
+        .badge-success {
+            background: var(--success);
+        }
+        
+        .badge-warning {
+            background: var(--warning);
+            color: black;
+        }
+        
+        .badge-danger {
+            background: var(--danger);
         }
         
         .search-box {
             display: flex;
             gap: 10px;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
         }
         
         .search-box input {
             flex: 1;
         }
         
+        .filter-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .filter-btn {
+            padding: 8px 20px;
+            border-radius: 30px;
+            background: var(--bg);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 1px solid var(--border);
+        }
+        
+        .filter-btn:hover, .filter-btn.active {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
+        
+        .item-card {
+            background: var(--bg);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border: 1px solid var(--border);
+            transition: all 0.3s;
+        }
+        
+        .item-card:hover {
+            border-color: var(--accent);
+            transform: translateX(5px);
+        }
+        
+        .avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            color: white;
+        }
+        
+        .stats-mini {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .stat-mini-card {
+            background: var(--bg);
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+        
+        .stat-mini-card .label {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        
+        .stat-mini-card .value {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-top: 5px;
+        }
+        
         @media (max-width: 768px) {
             .nav-tabs {
                 flex-direction: column;
+                border-radius: 20px;
             }
             
             .nav-tab {
                 width: 100%;
+                justify-content: center;
+            }
+            
+            .header {
+                flex-direction: column;
+                gap: 15px;
                 text-align: center;
             }
         }
@@ -1515,21 +1695,42 @@ function createEJSFiles() {
     <div class="container">
         <div class="header">
             <div>
-                <h1>👑 Admin Panel - <%= settings.botName %></h1>
-                <p style="color: var(--text-secondary); margin-top: 5px;">Welcome back, Admin</p>
+                <h1><i class="fas fa-crown" style="color: var(--warning);"></i> <%= settings.botName %> Admin</h1>
+                <p style="color: var(--text-secondary); margin-top: 5px;">
+                    <i class="fas fa-clock"></i> Last updated: <%= new Date().toLocaleString() %>
+                </p>
             </div>
-            <button class="btn btn-danger" onclick="logout()">Logout</button>
+            <button class="btn btn-danger" onclick="logout()">
+                <i class="fas fa-sign-out-alt"></i> Logout
+            </button>
         </div>
         
         <div class="nav-tabs">
-            <div class="nav-tab active" onclick="switchTab('dashboard')"><i class="fas fa-chart-line"></i> Dashboard</div>
-            <div class="nav-tab" onclick="switchTab('withdrawals')"><i class="fas fa-wallet"></i> Withdrawals</div>
-            <div class="nav-tab" onclick="switchTab('users')"><i class="fas fa-users"></i> Users</div>
-            <div class="nav-tab" onclick="switchTab('channels')"><i class="fas fa-tv"></i> Channels</div>
-            <div class="nav-tab" onclick="switchTab('giftCodes')"><i class="fas fa-gift"></i> Gift Codes</div>
-            <div class="nav-tab" onclick="switchTab('settings')"><i class="fas fa-cog"></i> Settings</div>
-            <div class="nav-tab" onclick="switchTab('upi')"><i class="fas fa-credit-card"></i> UPI Settings</div>
-            <div class="nav-tab" onclick="switchTab('broadcast')"><i class="fas fa-broadcast-tower"></i> Broadcast</div>
+            <div class="nav-tab active" onclick="switchTab('dashboard')">
+                <i class="fas fa-chart-line"></i> Dashboard
+            </div>
+            <div class="nav-tab" onclick="switchTab('withdrawals')">
+                <i class="fas fa-wallet"></i> Withdrawals
+                <span class="badge badge-warning" id="pendingCount">0</span>
+            </div>
+            <div class="nav-tab" onclick="switchTab('users')">
+                <i class="fas fa-users"></i> Users
+            </div>
+            <div class="nav-tab" onclick="switchTab('channels')">
+                <i class="fas fa-tv"></i> Channels
+            </div>
+            <div class="nav-tab" onclick="switchTab('giftCodes')">
+                <i class="fas fa-gift"></i> Gift Codes
+            </div>
+            <div class="nav-tab" onclick="switchTab('settings')">
+                <i class="fas fa-cog"></i> Settings
+            </div>
+            <div class="nav-tab" onclick="switchTab('upi')">
+                <i class="fas fa-credit-card"></i> UPI
+            </div>
+            <div class="nav-tab" onclick="switchTab('broadcast')">
+                <i class="fas fa-broadcast-tower"></i> Broadcast
+            </div>
         </div>
         
         <!-- Dashboard Tab -->
@@ -1538,38 +1739,58 @@ function createEJSFiles() {
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fas fa-users"></i></div>
                     <div class="stat-label">Total Users</div>
-                    <div class="stat-value"><%= stats.totalUsers %></div>
+                    <div class="stat-value" id="totalUsers"><%= stats.totalUsers %></div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
                     <div class="stat-label">Verified Users</div>
-                    <div class="stat-value"><%= stats.verifiedUsers %></div>
+                    <div class="stat-value" id="verifiedUsers"><%= stats.verifiedUsers %></div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fas fa-rupee-sign"></i></div>
                     <div class="stat-label">Total Balance</div>
-                    <div class="stat-value">₹<%= stats.totalBalance.toFixed(2) %></div>
+                    <div class="stat-value" id="totalBalance">₹<%= stats.totalBalance.toFixed(2) %></div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fas fa-clock"></i></div>
                     <div class="stat-label">Pending Withdrawals</div>
-                    <div class="stat-value"><%= stats.pendingWithdrawals %></div>
+                    <div class="stat-value" id="pendingWithdrawals"><%= stats.pendingWithdrawals %></div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fas fa-gift"></i></div>
                     <div class="stat-label">Active Gift Codes</div>
-                    <div class="stat-value"><%= stats.activeGiftCodes %></div>
+                    <div class="stat-value" id="activeGiftCodes"><%= stats.activeGiftCodes %></div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fas fa-exchange-alt"></i></div>
                     <div class="stat-label">Total Transactions</div>
-                    <div class="stat-value"><%= stats.totalTransactions %></div>
+                    <div class="stat-value" id="totalTransactions"><%= stats.totalTransactions %></div>
+                </div>
+            </div>
+            
+            <div class="stats-mini">
+                <div class="stat-mini-card">
+                    <div class="label"><i class="fas fa-calendar-day"></i> Today's Users</div>
+                    <div class="value" id="todayUsers">0</div>
+                </div>
+                <div class="stat-mini-card">
+                    <div class="label"><i class="fas fa-calendar-day"></i> Today's Withdrawals</div>
+                    <div class="value" id="todayWithdrawals">0</div>
+                </div>
+                <div class="stat-mini-card">
+                    <div class="label"><i class="fas fa-calendar-day"></i> Today's Earnings</div>
+                    <div class="value" id="todayEarnings">₹0</div>
                 </div>
             </div>
             
             <div class="table-container">
-                <h2 style="margin-bottom: 20px;">Recent Users</h2>
-                <table>
+                <h2 style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
+                    <span><i class="fas fa-history"></i> Recent Users</span>
+                    <button class="btn btn-primary btn-sm" onclick="refreshDashboard()">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </h2>
+                <table id="recentUsersTable">
                     <thead>
                         <tr>
                             <th>User ID</th>
@@ -1604,10 +1825,19 @@ function createEJSFiles() {
         
         <!-- Withdrawals Tab -->
         <div class="tab-content" id="withdrawals">
-            <div style="margin-bottom: 20px;">
-                <button class="btn btn-primary" onclick="loadWithdrawals('pending')">Pending</button>
-                <button class="btn btn-success" onclick="loadWithdrawals('completed')">Completed</button>
-                <button class="btn btn-danger" onclick="loadWithdrawals('rejected')">Rejected</button>
+            <div class="filter-buttons">
+                <button class="filter-btn active" onclick="loadWithdrawals('pending')">
+                    <i class="fas fa-clock"></i> Pending
+                </button>
+                <button class="filter-btn" onclick="loadWithdrawals('completed')">
+                    <i class="fas fa-check-circle"></i> Completed
+                </button>
+                <button class="filter-btn" onclick="loadWithdrawals('rejected')">
+                    <i class="fas fa-times-circle"></i> Rejected
+                </button>
+                <button class="filter-btn" onclick="loadWithdrawals('all')">
+                    <i class="fas fa-list"></i> All
+                </button>
             </div>
             
             <div class="table-container">
@@ -1632,9 +1862,13 @@ function createEJSFiles() {
         <!-- Users Tab -->
         <div class="tab-content" id="users">
             <div class="search-box">
-                <input type="text" class="form-control" placeholder="Search by User ID, Name, or Refer Code" id="searchUser">
-                <button class="btn btn-primary" onclick="searchUsers()">Search</button>
-                <button class="btn btn-success" onclick="exportUsers()">Export CSV</button>
+                <input type="text" class="form-control" placeholder="Search by User ID, Name, Username, or Refer Code" id="searchUser">
+                <button class="btn btn-primary" onclick="searchUsers()">
+                    <i class="fas fa-search"></i> Search
+                </button>
+                <button class="btn btn-success" onclick="exportUsers()">
+                    <i class="fas fa-download"></i> Export CSV
+                </button>
             </div>
             
             <div class="table-container">
@@ -1643,11 +1877,11 @@ function createEJSFiles() {
                         <tr>
                             <th>User ID</th>
                             <th>Name</th>
+                            <th>Username</th>
                             <th>Balance</th>
                             <th>Refer Code</th>
                             <th>Referrals</th>
                             <th>Verified</th>
-                            <th>Device ID</th>
                             <th>Joined</th>
                             <th>Action</th>
                         </tr>
@@ -1657,15 +1891,18 @@ function createEJSFiles() {
                         <tr>
                             <td><%= user.userId %></td>
                             <td><%= user.fullName || 'N/A' %></td>
+                            <td>@<%= user.username || 'N/A' %></td>
                             <td>₹<%= user.balance.toFixed(2) %></td>
                             <td><%= user.referCode %></td>
                             <td><%= user.referralCount || 0 %></td>
                             <td><%= user.verified ? '✅' : '❌' %></td>
-                            <td><%= (user.deviceId || '').substring(0, 8) %>...</td>
                             <td><%= new Date(user.createdAt).toLocaleDateString() %></td>
                             <td>
                                 <button class="btn btn-primary btn-sm" onclick="viewUser('<%= user.userId %>')">
                                     <i class="fas fa-eye"></i>
+                                </button>
+                                <button class="btn btn-success btn-sm" onclick="addBalanceModal('<%= user.userId %>')">
+                                    <i class="fas fa-plus-circle"></i>
                                 </button>
                             </td>
                         </tr>
@@ -1691,7 +1928,7 @@ function createEJSFiles() {
                             <th>Button Text</th>
                             <th>Auto Accept</th>
                             <th>Status</th>
-                            <th>Action</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="channelsList"></tbody>
@@ -1710,9 +1947,8 @@ function createEJSFiles() {
                     <thead>
                         <tr>
                             <th>Code</th>
-                            <th>Min Amount</th>
-                            <th>Max Amount</th>
-                            <th>Total Users</th>
+                            <th>Range</th>
+                            <th>Total</th>
                             <th>Used</th>
                             <th>Expires</th>
                             <th>Status</th>
@@ -1731,79 +1967,96 @@ function createEJSFiles() {
                     <div class="stat-card">
                         <h3><i class="fas fa-robot"></i> Bot Settings</h3>
                         <div class="form-group">
-                            <label>Bot Name</label>
+                            <label class="form-label">Bot Name</label>
                             <input type="text" class="form-control" name="botName" value="<%= settings.botName %>" required>
                         </div>
                         <div class="form-group">
-                            <label>Bot Logo</label>
+                            <label class="form-label">Bot Logo</label>
                             <input type="file" class="form-control" name="botLogo" accept="image/*" id="botLogo">
                             <% if (settings.botLogo) { %>
-                                <div style="margin-top: 10px;">
-                                    <img src="<%= settings.botLogo %>" style="width: 50px; height: 50px; border-radius: 10px;" alt="Current Logo">
+                                <div style="margin-top: 15px; text-align: center;">
+                                    <img src="<%= settings.botLogo %>" style="width: 80px; height: 80px; border-radius: 16px; border: 2px solid var(--accent);" alt="Current Logo">
+                                    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 5px;">Current Logo</p>
                                 </div>
                             <% } %>
                         </div>
+                    </div>
+                    
+                    <div class="stat-card">
+                        <h3><i class="fas fa-coins"></i> Financial Settings</h3>
                         <div class="form-group">
-                            <label>Min Withdraw (₹)</label>
+                            <label class="form-label">Min Withdraw (₹)</label>
                             <input type="number" class="form-control" name="minWithdraw" value="<%= settings.minWithdraw %>" min="1" required>
                         </div>
                         <div class="form-group">
-                            <label>Max Withdraw (₹)</label>
+                            <label class="form-label">Max Withdraw (₹)</label>
                             <input type="number" class="form-control" name="maxWithdraw" value="<%= settings.maxWithdraw %>" min="1" required>
                         </div>
                         <div class="form-group">
-                            <label>Refer Bonus (₹)</label>
+                            <label class="form-label">Refer Bonus (₹)</label>
                             <input type="number" class="form-control" name="referBonus" value="<%= settings.referBonus %>" min="0" required>
                         </div>
                         <div class="form-group">
-                            <label>Welcome Bonus (₹)</label>
+                            <label class="form-label">Welcome Bonus (₹)</label>
                             <input type="number" class="form-control" name="welcomeBonus" value="<%= settings.welcomeBonus %>" min="0" required>
                         </div>
                         <div class="form-group">
-                            <label>Withdraw Tax (%)</label>
+                            <label class="form-label">Withdraw Tax (%)</label>
                             <input type="number" class="form-control" name="withdrawTax" value="<%= settings.withdrawTax %>" min="0" max="100" required>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card">
+                        <h3><i class="fas fa-gift"></i> Gift Settings</h3>
+                        <div class="form-group">
+                            <label class="form-label">Min Gift Amount (₹)</label>
+                            <input type="number" class="form-control" name="minGiftAmount" value="<%= settings.minGiftAmount %>" min="1" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Max Gift Amount (₹)</label>
+                            <input type="number" class="form-control" name="maxGiftAmount" value="<%= settings.maxGiftAmount %>" min="1" required>
                         </div>
                     </div>
                     
                     <div class="stat-card">
                         <h3><i class="fas fa-toggle-on"></i> Toggle Settings</h3>
                         <div class="form-group">
-                            <label>Bot Enabled</label>
+                            <label class="form-label">Bot Enabled</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="botEnabled" <%= settings.botEnabled ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label>Device Verification</label>
+                            <label class="form-label">Device Verification</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="deviceVerification" <%= settings.deviceVerification ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label>Auto Withdraw (API)</label>
+                            <label class="form-label">Auto Withdraw (API)</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="autoWithdraw" <%= settings.autoWithdraw ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label>Withdrawals Enabled</label>
+                            <label class="form-label">Withdrawals Enabled</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="withdrawalsEnabled" <%= settings.withdrawalsEnabled ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label>Channel Verification</label>
+                            <label class="form-label">Channel Verification</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="channelVerification" <%= settings.channelVerification ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label>Auto Accept Private</label>
+                            <label class="form-label">Auto Accept Private</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="autoAcceptPrivate" <%= settings.autoAcceptPrivate ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
@@ -1814,20 +2067,20 @@ function createEJSFiles() {
                     <div class="stat-card">
                         <h3><i class="fas fa-user-shield"></i> Admin Settings</h3>
                         <div class="form-group">
-                            <label>Add Admin (User ID)</label>
+                            <label class="form-label">Add Admin (User ID)</label>
                             <div class="search-box">
                                 <input type="number" class="form-control" id="newAdminId" placeholder="Enter User ID">
                                 <button type="button" class="btn btn-primary" onclick="addAdmin()">Add</button>
                             </div>
                         </div>
                         <div class="form-group">
-                            <label>Current Admins</label>
+                            <label class="form-label">Current Admins</label>
                             <div id="adminsList"></div>
                         </div>
                     </div>
                 </div>
                 
-                <button type="submit" class="btn btn-success" style="width: 100%; padding: 15px; font-size: 1.1rem;">
+                <button type="submit" class="btn btn-success" style="width: 100%; padding: 16px; font-size: 1.2rem; margin-top: 20px;">
                     <i class="fas fa-save"></i> Save All Settings
                 </button>
             </form>
@@ -1840,27 +2093,33 @@ function createEJSFiles() {
                     <div class="stat-card">
                         <h3><i class="fas fa-credit-card"></i> UPI Configuration</h3>
                         <div class="form-group">
-                            <label>Enable UPI Payments</label>
+                            <label class="form-label">Enable UPI Payments</label>
                             <label class="toggle-switch">
                                 <input type="checkbox" name="upiEnabled" <%= settings.upiEnabled ? 'checked' : '' %>>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label>Default UPI ID</label>
+                            <label class="form-label">Default UPI ID</label>
                             <input type="text" class="form-control" name="upiId" value="<%= settings.upiId || '' %>" placeholder="example@okhdfcbank">
                         </div>
                         <div class="form-group">
-                            <label>UPI Name</label>
+                            <label class="form-label">UPI Name</label>
                             <input type="text" class="form-control" name="upiName" value="<%= settings.upiName || '' %>" placeholder="Account Holder Name">
                         </div>
                         <div class="form-group">
-                            <label>API URL</label>
+                            <label class="form-label">API URL</label>
                             <input type="text" class="form-control" value="<%= EASEPAY_API %>" readonly disabled>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Test Payment</label>
+                            <button type="button" class="btn btn-primary" onclick="testPayment()">
+                                <i class="fas fa-vial"></i> Test API
+                            </button>
                         </div>
                     </div>
                 </div>
-                <button type="submit" class="btn btn-success" style="width: 100%; padding: 15px;">
+                <button type="submit" class="btn btn-success" style="width: 100%; padding: 16px; font-size: 1.2rem; margin-top: 20px;">
                     <i class="fas fa-save"></i> Save UPI Settings
                 </button>
             </form>
@@ -1871,36 +2130,44 @@ function createEJSFiles() {
             <form id="broadcastForm" onsubmit="sendBroadcast(event)" enctype="multipart/form-data">
                 <div class="cards-grid">
                     <div class="stat-card">
-                        <h3><i class="fas fa-bullhorn"></i> Send Broadcast</h3>
+                        <h3><i class="fas fa-bullhorn"></i> Compose Message</h3>
                         <div class="form-group">
-                            <label>Message</label>
-                            <textarea class="form-control" name="message" rows="6" placeholder="Enter your message here..." required></textarea>
+                            <label class="form-label">Message</label>
+                            <textarea class="form-control" name="message" rows="8" placeholder="Enter your message here... Supports HTML formatting" required></textarea>
+                            <small style="color: var(--text-secondary);">HTML tags: &lt;b&gt;, &lt;i&gt;, &lt;a href=""&gt; are supported</small>
                         </div>
                         <div class="form-group">
-                            <label>Image (Optional)</label>
+                            <label class="form-label">Image (Optional)</label>
                             <input type="file" class="form-control" name="image" accept="image/*">
                         </div>
                         <div class="form-group">
-                            <label>Button Text (Optional)</label>
+                            <label class="form-label">Button Text (Optional)</label>
                             <input type="text" class="form-control" name="buttonText" placeholder="Click Here">
                         </div>
                         <div class="form-group">
-                            <label>Button URL (Optional)</label>
+                            <label class="form-label">Button URL (Optional)</label>
                             <input type="url" class="form-control" name="buttonUrl" placeholder="https://example.com">
                         </div>
-                        <button type="submit" class="btn btn-primary">
-                            <i class="fas fa-paper-plane"></i> Send to All Users
-                        </button>
+                        <div class="form-group">
+                            <label class="form-label">Preview</label>
+                            <div style="background: var(--bg); padding: 20px; border-radius: 12px; border: 1px solid var(--border);" id="preview">
+                                <div id="previewText">Your message will appear here</div>
+                                <div id="previewButton" style="margin-top: 15px;"></div>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="stat-card">
                         <h3><i class="fas fa-chart-pie"></i> Broadcast Stats</h3>
-                        <div class="stat-value"><%= stats.totalUsers %></div>
+                        <div class="stat-value" style="font-size: 3rem;"><%= stats.totalUsers %></div>
                         <div class="stat-label">Total Recipients</div>
-                        <p style="margin-top: 20px; color: var(--warning);">
+                        <p style="margin-top: 20px; color: var(--warning); padding: 15px; background: rgba(251, 191, 36, 0.1); border-radius: 12px;">
                             <i class="fas fa-exclamation-triangle"></i> 
                             Broadcasting to all users may take some time depending on the number of users.
                         </p>
+                        <button type="submit" class="btn btn-primary" style="width: 100%; padding: 16px; font-size: 1.2rem;">
+                            <i class="fas fa-paper-plane"></i> Send to All Users
+                        </button>
                     </div>
                 </div>
             </form>
@@ -1917,37 +2184,37 @@ function createEJSFiles() {
             <form id="channelForm" onsubmit="saveChannel(event)">
                 <input type="hidden" name="channelId" id="channelId">
                 <div class="form-group">
-                    <label>Channel Name</label>
+                    <label class="form-label">Channel Name</label>
                     <input type="text" class="form-control" name="name" id="channelName" required>
                 </div>
                 <div class="form-group">
-                    <label>Channel ID/Username</label>
+                    <label class="form-label">Channel ID/Username</label>
                     <input type="text" class="form-control" name="channelId" id="channelChannelId" placeholder="@channel or -100123456789" required>
                 </div>
                 <div class="form-group">
-                    <label>Button Text</label>
+                    <label class="form-label">Button Text</label>
                     <input type="text" class="form-control" name="buttonText" id="channelButtonText" value="Join Channel">
                 </div>
                 <div class="form-group">
-                    <label>Invite Link</label>
+                    <label class="form-label">Invite Link</label>
                     <input type="url" class="form-control" name="link" id="channelLink" placeholder="https://t.me/..." required>
                 </div>
                 <div class="form-group">
-                    <label>Description</label>
+                    <label class="form-label">Description</label>
                     <input type="text" class="form-control" name="description" id="channelDescription">
                 </div>
                 <div class="form-group">
-                    <label>Position</label>
+                    <label class="form-label">Position</label>
                     <input type="number" class="form-control" name="position" id="channelPosition" value="0">
                 </div>
                 <div class="form-group">
-                    <label>
+                    <label class="form-label">
                         <input type="checkbox" name="autoAccept" id="channelAutoAccept">
                         Auto Accept (for private channels)
                     </label>
                 </div>
                 <div class="form-group">
-                    <label>
+                    <label class="form-label">
                         <input type="checkbox" name="enabled" id="channelEnabled" checked>
                         Enabled
                     </label>
@@ -1967,26 +2234,26 @@ function createEJSFiles() {
             <form id="giftForm" onsubmit="saveGiftCode(event)">
                 <input type="hidden" name="codeId" id="codeId">
                 <div class="form-group">
-                    <label>Code (6 digits)</label>
+                    <label class="form-label">Code (6 digits)</label>
                     <div class="search-box">
                         <input type="text" class="form-control" name="code" id="code" maxlength="6" pattern="[A-Z0-9]{6}" required>
                         <button type="button" class="btn btn-primary" onclick="generateCode()">Generate</button>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>Min Amount (₹)</label>
+                    <label class="form-label">Min Amount (₹)</label>
                     <input type="number" class="form-control" name="minAmount" id="minAmount" min="1" required>
                 </div>
                 <div class="form-group">
-                    <label>Max Amount (₹)</label>
+                    <label class="form-label">Max Amount (₹)</label>
                     <input type="number" class="form-control" name="maxAmount" id="maxAmount" min="1" required>
                 </div>
                 <div class="form-group">
-                    <label>Total Users</label>
+                    <label class="form-label">Total Users</label>
                     <input type="number" class="form-control" name="totalUsers" id="totalUsers" min="1" value="1" required>
                 </div>
                 <div class="form-group">
-                    <label>Expiry (minutes)</label>
+                    <label class="form-label">Expiry (minutes)</label>
                     <input type="number" class="form-control" name="expiryMinutes" id="expiryMinutes" min="1" value="1440" required>
                 </div>
                 <button type="submit" class="btn btn-success">Generate Code</button>
@@ -2001,19 +2268,37 @@ function createEJSFiles() {
                 <h3>User Details</h3>
                 <button class="close-btn" onclick="closeUserModal()">&times;</button>
             </div>
-            <div id="userDetails" style="margin-bottom: 20px;"></div>
+            <div id="userDetails" style="margin-bottom: 25px;"></div>
             
-            <h4>Add Balance</h4>
+            <h4><i class="fas fa-plus-circle" style="color: var(--success);"></i> Add Balance</h4>
             <div class="form-group">
                 <input type="number" class="form-control" id="addBalanceAmount" placeholder="Amount">
                 <input type="text" class="form-control" id="addBalanceReason" placeholder="Reason" style="margin-top: 10px;">
-                <button class="btn btn-primary" style="margin-top: 10px;" onclick="addUserBalance()">
+                <button class="btn btn-primary" style="margin-top: 15px; width: 100%;" onclick="addUserBalance()">
                     <i class="fas fa-plus-circle"></i> Add Balance
                 </button>
             </div>
             
-            <h4 style="margin-top: 20px;">Recent Transactions</h4>
-            <div id="userTransactions" style="max-height: 200px; overflow-y: auto;"></div>
+            <h4 style="margin-top: 25px;"><i class="fas fa-history"></i> Recent Transactions</h4>
+            <div id="userTransactions" style="max-height: 250px; overflow-y: auto;"></div>
+        </div>
+    </div>
+    
+    <!-- Add Balance Modal (for users list) -->
+    <div class="modal" id="addBalanceModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add Balance</h3>
+                <button class="close-btn" onclick="closeAddBalanceModal()">&times;</button>
+            </div>
+            <div class="form-group">
+                <label class="form-label">User ID: <span id="balanceUserId"></span></label>
+                <input type="number" class="form-control" id="balanceAmount" placeholder="Amount">
+                <input type="text" class="form-control" id="balanceReason" placeholder="Reason" style="margin-top: 10px;">
+                <button class="btn btn-success" style="margin-top: 20px; width: 100%;" onclick="submitAddBalance()">
+                    <i class="fas fa-plus-circle"></i> Add Balance
+                </button>
+            </div>
         </div>
     </div>
     
@@ -2030,11 +2315,53 @@ function createEJSFiles() {
         let settings = <%- JSON.stringify(settings) %>;
         let withdrawals = [];
         let giftCodes = [];
+        let users = <%- JSON.stringify(users || []) %>;
+        let currentUserId = null;
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            updatePendingCount();
+            loadTodayStats();
+            renderAdmins();
+            renderChannels();
+            loadGiftCodes();
+            setupPreview();
+        });
+        
+        function updatePendingCount() {
+            fetch('/api/admin/withdrawals?status=pending&userId=' + adminUserId)
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('pendingCount').textContent = data.length;
+                });
+        }
+        
+        function loadTodayStats() {
+            const today = new Date().toDateString();
+            
+            // Today's users
+            const todayUsers = users.filter(u => new Date(u.createdAt).toDateString() === today).length;
+            document.getElementById('todayUsers').textContent = todayUsers;
+            
+            // Today's withdrawals and earnings would need separate API calls
+            fetch('/api/admin/stats/today?userId=' + adminUserId)
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('todayWithdrawals').textContent = data.withdrawals || 0;
+                    document.getElementById('todayEarnings').textContent = '₹' + (data.earnings || 0);
+                })
+                .catch(err => console.error(err));
+        }
+        
+        function refreshDashboard() {
+            window.location.reload();
+        }
         
         function switchTab(tab) {
             document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelector('.nav-tab[onclick="switchTab(\'' + tab + '\')"]').classList.add('active');
+            
+            document.querySelector(`.nav-tab[onclick="switchTab('${tab}')"]`).classList.add('active');
             document.getElementById(tab).classList.add('active');
             
             if (tab === 'withdrawals') loadWithdrawals('pending');
@@ -2045,11 +2372,19 @@ function createEJSFiles() {
         
         function loadWithdrawals(status) {
             currentWithdrawalStatus = status;
-            fetch('/api/admin/withdrawals?status=' + status + '&userId=' + adminUserId)
+            fetch('/api/admin/withdrawals?status=' + (status !== 'all' ? status : '') + '&userId=' + adminUserId)
                 .then(res => res.json())
                 .then(data => {
                     withdrawals = data;
                     renderWithdrawals();
+                    
+                    // Update filter buttons
+                    document.querySelectorAll('.filter-btn').forEach(btn => {
+                        btn.classList.remove('active');
+                        if (btn.textContent.toLowerCase().includes(status)) {
+                            btn.classList.add('active');
+                        }
+                    });
                 })
                 .catch(err => {
                     console.error(err);
@@ -2061,27 +2396,35 @@ function createEJSFiles() {
             const tbody = document.getElementById('withdrawalsBody');
             if (!tbody) return;
             
-            tbody.innerHTML = withdrawals.map(w => \`
+            if (withdrawals.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 40px;">No withdrawals found</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = withdrawals.map(w => {
+                const statusColor = w.status === 'pending' ? 'var(--warning)' : 
+                                   w.status === 'completed' ? 'var(--success)' : 'var(--danger)';
+                return `
                 <tr>
-                    <td>\${w.userId}</td>
-                    <td>₹\${w.amount}</td>
-                    <td>₹\${w.tax}</td>
-                    <td>₹\${w.netAmount}</td>
-                    <td>\${w.upiId}</td>
-                    <td><span class="badge" style="background: \${w.status === 'pending' ? 'var(--warning)' : w.status === 'completed' ? 'var(--success)' : 'var(--danger)'}">\${w.status}</span></td>
-                    <td>\${new Date(w.createdAt).toLocaleString()}</td>
+                    <td><strong>${w.userId}</strong></td>
+                    <td>₹${w.amount}</td>
+                    <td>₹${w.tax}</td>
+                    <td><strong>₹${w.netAmount}</strong></td>
+                    <td>${w.upiId}</td>
+                    <td><span class="badge" style="background: ${statusColor}">${w.status}</span></td>
+                    <td>${new Date(w.createdAt).toLocaleString()}</td>
                     <td>
-                        \${w.status === 'pending' ? \`
-                            <button class="btn btn-success btn-sm" onclick="acceptWithdrawal('\${w._id}')">
+                        ${w.status === 'pending' ? `
+                            <button class="btn btn-success btn-sm" onclick="acceptWithdrawal('${w._id}')">
                                 <i class="fas fa-check"></i>
                             </button>
-                            <button class="btn btn-danger btn-sm" onclick="rejectWithdrawal('\${w._id}')">
+                            <button class="btn btn-danger btn-sm" onclick="rejectWithdrawal('${w._id}')">
                                 <i class="fas fa-times"></i>
                             </button>
-                        \` : ''}
+                        ` : ''}
                     </td>
                 </tr>
-            \`).join('');
+            `}).join('');
         }
         
         function acceptWithdrawal(id) {
@@ -2097,6 +2440,7 @@ function createEJSFiles() {
                 if (data.success) {
                     alert('Withdrawal accepted' + (data.paymentSuccess ? ' and payment sent' : ''));
                     loadWithdrawals(currentWithdrawalStatus);
+                    updatePendingCount();
                 } else {
                     alert(data.error || 'Error accepting withdrawal');
                 }
@@ -2120,6 +2464,7 @@ function createEJSFiles() {
                 if (data.success) {
                     alert('Withdrawal rejected');
                     loadWithdrawals(currentWithdrawalStatus);
+                    updatePendingCount();
                 } else {
                     alert(data.error || 'Error rejecting withdrawal');
                 }
@@ -2134,30 +2479,35 @@ function createEJSFiles() {
             const tbody = document.getElementById('channelsList');
             if (!tbody) return;
             
-            tbody.innerHTML = channels.sort((a, b) => (a.position || 0) - (b.position || 0)).map(c => \`
+            if (!channels || channels.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px;">No channels added yet</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = channels.sort((a, b) => (a.position || 0) - (b.position || 0)).map(c => `
                 <tr>
-                    <td>\${c.position || 0}</td>
-                    <td>\${c.name}</td>
-                    <td>\${c.channelId}</td>
-                    <td>\${c.buttonText || 'Join Channel'}</td>
-                    <td>\${c.autoAccept ? '✅' : '❌'}</td>
-                    <td>\${c.enabled !== false ? '✅' : '❌'}</td>
+                    <td>${c.position || 0}</td>
+                    <td><strong>${c.name}</strong></td>
+                    <td>${c.channelId}</td>
+                    <td>${c.buttonText || 'Join Channel'}</td>
+                    <td>${c.autoAccept ? '✅' : '❌'}</td>
+                    <td>${c.enabled !== false ? '✅' : '❌'}</td>
                     <td>
-                        <button class="btn btn-primary btn-sm" onclick="editChannel('\${c._id}')">
+                        <button class="btn btn-primary btn-sm" onclick="editChannel('${c._id}')">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button class="btn btn-danger btn-sm" onclick="deleteChannel('\${c._id}')">
+                        <button class="btn btn-danger btn-sm" onclick="deleteChannel('${c._id}')">
                             <i class="fas fa-trash"></i>
                         </button>
-                        <button class="btn btn-warning btn-sm" onclick="moveChannel('\${c._id}', 'up')">
+                        <button class="btn btn-warning btn-sm" onclick="moveChannel('${c._id}', 'up')">
                             <i class="fas fa-arrow-up"></i>
                         </button>
-                        <button class="btn btn-warning btn-sm" onclick="moveChannel('\${c._id}', 'down')">
+                        <button class="btn btn-warning btn-sm" onclick="moveChannel('${c._id}', 'down')">
                             <i class="fas fa-arrow-down"></i>
                         </button>
                     </td>
                 </tr>
-            \`).join('');
+            `).join('');
         }
         
         function openChannelModal() {
@@ -2297,7 +2647,6 @@ function createEJSFiles() {
                 })
                 .catch(err => {
                     console.error(err);
-                    alert('Error loading gift codes');
                 });
         }
         
@@ -2305,22 +2654,28 @@ function createEJSFiles() {
             const tbody = document.getElementById('giftCodesBody');
             if (!tbody) return;
             
-            tbody.innerHTML = giftCodes.map(g => \`
+            if (giftCodes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px;">No gift codes generated</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = giftCodes.map(g => {
+                const isExpired = new Date() > new Date(g.expiresAt);
+                return `
                 <tr>
-                    <td><strong>\${g.code}</strong></td>
-                    <td>₹\${g.minAmount}</td>
-                    <td>₹\${g.maxAmount}</td>
-                    <td>\${g.totalUsers}</td>
-                    <td>\${g.usedCount || 0}</td>
-                    <td>\${new Date(g.expiresAt).toLocaleString()}</td>
-                    <td><span class="badge" style="background: \${new Date() > new Date(g.expiresAt) ? 'var(--danger)' : 'var(--success)'}">\${new Date() > new Date(g.expiresAt) ? 'Expired' : 'Active'}</span></td>
+                    <td><strong>${g.code}</strong></td>
+                    <td>₹${g.minAmount} - ₹${g.maxAmount}</td>
+                    <td>${g.totalUsers}</td>
+                    <td>${g.usedCount || 0}</td>
+                    <td>${new Date(g.expiresAt).toLocaleString()}</td>
+                    <td><span class="badge" style="background: ${isExpired ? 'var(--danger)' : 'var(--success)'}">${isExpired ? 'Expired' : 'Active'}</span></td>
                     <td>
-                        <button class="btn btn-danger btn-sm" onclick="deleteGiftCode('\${g._id}')">
+                        <button class="btn btn-danger btn-sm" onclick="deleteGiftCode('${g._id}')">
                             <i class="fas fa-trash"></i>
                         </button>
                     </td>
                 </tr>
-            \`).join('');
+            `}).join('');
         }
         
         function saveGiftCode(event) {
@@ -2466,16 +2821,46 @@ function createEJSFiles() {
             });
         }
         
+        function testPayment() {
+            const upiId = document.querySelector('input[name="upiId"]').value;
+            if (!upiId) {
+                alert('Please enter a UPI ID first');
+                return;
+            }
+            
+            fetch('/api/admin/test-payment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ upiId, userId: adminUserId })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    alert('API is working!');
+                } else {
+                    alert('API test failed: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('API test failed: ' + err.message);
+            });
+        }
+        
         function renderAdmins() {
             const list = document.getElementById('adminsList');
             if (!list) return;
             
-            list.innerHTML = (settings.adminIds || []).map(id => \`
-                <div style="display: flex; justify-content: space-between; align-items: center; background: var(--bg); padding: 10px; border-radius: 8px; margin-bottom: 5px;">
-                    <span>\${id}</span>
-                    <button class="btn btn-danger btn-sm" onclick="removeAdmin('\${id}')">Remove</button>
+            if (!settings.adminIds || settings.adminIds.length === 0) {
+                list.innerHTML = '<p style="color: var(--text-secondary);">No admins added</p>';
+                return;
+            }
+            
+            list.innerHTML = (settings.adminIds || []).map(id => `
+                <div style="display: flex; justify-content: space-between; align-items: center; background: var(--bg); padding: 12px 15px; border-radius: 12px; margin-bottom: 8px;">
+                    <span><i class="fas fa-user-shield" style="color: var(--accent);"></i> ${id}</span>
+                    <button class="btn btn-danger btn-sm" onclick="removeAdmin('${id}')">Remove</button>
                 </div>
-            \`).join('');
+            `).join('');
         }
         
         function addAdmin() {
@@ -2525,40 +2910,97 @@ function createEJSFiles() {
             });
         }
         
+        function setupPreview() {
+            const messageInput = document.querySelector('textarea[name="message"]');
+            const buttonTextInput = document.querySelector('input[name="buttonText"]');
+            const buttonUrlInput = document.querySelector('input[name="buttonUrl"]');
+            
+            function updatePreview() {
+                const previewText = document.getElementById('previewText');
+                const previewButton = document.getElementById('previewButton');
+                
+                previewText.innerHTML = messageInput.value || 'Your message will appear here';
+                
+                if (buttonTextInput.value && buttonUrlInput.value) {
+                    previewButton.innerHTML = `<button class="btn btn-primary" style="width: auto;" onclick="window.open('${buttonUrlInput.value}', '_blank')">${buttonTextInput.value}</button>`;
+                } else {
+                    previewButton.innerHTML = '';
+                }
+            }
+            
+            messageInput.addEventListener('input', updatePreview);
+            buttonTextInput.addEventListener('input', updatePreview);
+            buttonUrlInput.addEventListener('input', updatePreview);
+        }
+        
         function viewUser(userId) {
             fetch('/api/admin/users/' + userId + '?userId=' + adminUserId)
                 .then(res => res.json())
                 .then(user => {
-                    document.getElementById('userDetails').innerHTML = \`
-                        <p><strong>User ID:</strong> \${user.userId}</p>
-                        <p><strong>Name:</strong> \${user.fullName || 'N/A'}</p>
-                        <p><strong>Username:</strong> @\${user.username || 'N/A'}</p>
-                        <p><strong>Balance:</strong> ₹\${user.balance.toFixed(2)}</p>
-                        <p><strong>Refer Code:</strong> \${user.referCode}</p>
-                        <p><strong>Referrals:</strong> \${user.referralCount || 0}</p>
-                        <p><strong>Verified:</strong> \${user.verified ? '✅' : '❌'}</p>
-                        <p><strong>Device ID:</strong> \${user.deviceId || 'N/A'}</p>
-                        <p><strong>IP:</strong> \${user.ip || 'N/A'}</p>
-                        <p><strong>Joined:</strong> \${new Date(user.createdAt).toLocaleString()}</p>
-                        <p><strong>Channels Joined:</strong> \${(user.joinedChannels || []).length}</p>
-                    \`;
+                    document.getElementById('userDetails').innerHTML = `
+                        <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 20px;">
+                            <div class="avatar">
+                                <i class="fas fa-user"></i>
+                            </div>
+                            <div>
+                                <h2 style="margin-bottom: 5px;">${user.fullName || 'User'}</h2>
+                                <p style="color: var(--text-secondary);">@${user.username || 'N/A'}</p>
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                            <div style="background: var(--bg); padding: 15px; border-radius: 12px;">
+                                <div style="color: var(--text-secondary);">User ID</div>
+                                <div style="font-weight: bold;">${user.userId}</div>
+                            </div>
+                            <div style="background: var(--bg); padding: 15px; border-radius: 12px;">
+                                <div style="color: var(--text-secondary);">Balance</div>
+                                <div style="font-weight: bold; color: var(--success);">₹${user.balance.toFixed(2)}</div>
+                            </div>
+                            <div style="background: var(--bg); padding: 15px; border-radius: 12px;">
+                                <div style="color: var(--text-secondary);">Refer Code</div>
+                                <div style="font-weight: bold;">${user.referCode}</div>
+                            </div>
+                            <div style="background: var(--bg); padding: 15px; border-radius: 12px;">
+                                <div style="color: var(--text-secondary);">Referrals</div>
+                                <div style="font-weight: bold;">${user.referralCount || 0}</div>
+                            </div>
+                            <div style="background: var(--bg); padding: 15px; border-radius: 12px;">
+                                <div style="color: var(--text-secondary);">Verified</div>
+                                <div style="font-weight: bold;">${user.verified ? '✅ Yes' : '❌ No'}</div>
+                            </div>
+                            <div style="background: var(--bg); padding: 15px; border-radius: 12px;">
+                                <div style="color: var(--text-secondary);">Joined</div>
+                                <div style="font-weight: bold;">${new Date(user.createdAt).toLocaleString()}</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 20px;">
+                            <p><strong>Device ID:</strong> ${user.deviceId || 'N/A'}</p>
+                            <p><strong>Channels Joined:</strong> ${(user.joinedChannels || []).length}</p>
+                        </div>
+                    `;
                     
                     // Load transactions
                     fetch('/api/admin/users/' + userId + '/transactions?userId=' + adminUserId)
                         .then(res => res.json())
                         .then(transactions => {
                             const txDiv = document.getElementById('userTransactions');
-                            txDiv.innerHTML = transactions.map(tx => \`
-                                <div style="background: var(--bg); padding: 10px; border-radius: 8px; margin-bottom: 5px;">
-                                    <div>\${tx.description}</div>
-                                    <div style="display: flex; justify-content: space-between;">
-                                        <span style="color: var(--text-secondary);">\${new Date(tx.createdAt).toLocaleString()}</span>
-                                        <span style="color: \${tx.type === 'credit' ? 'var(--success)' : 'var(--danger)'}; font-weight: bold;">
-                                            \${tx.type === 'credit' ? '+' : '-'} ₹\${tx.amount}
-                                        </span>
+                            if (transactions.length === 0) {
+                                txDiv.innerHTML = '<p style="color: var(--text-secondary);">No transactions yet</p>';
+                            } else {
+                                txDiv.innerHTML = transactions.map(tx => `
+                                    <div style="background: var(--bg); padding: 12px; border-radius: 12px; margin-bottom: 8px;">
+                                        <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                            <span>${tx.description}</span>
+                                            <span style="color: ${tx.type === 'credit' ? 'var(--success)' : 'var(--danger)'}; font-weight: bold;">
+                                                ${tx.type === 'credit' ? '+' : '-'} ₹${tx.amount}
+                                            </span>
+                                        </div>
+                                        <div style="color: var(--text-secondary); font-size: 0.85rem;">
+                                            ${new Date(tx.createdAt).toLocaleString()}
+                                        </div>
                                     </div>
-                                </div>
-                            \`).join('');
+                                `).join('');
+                            }
                         });
                     
                     document.getElementById('userModal').style.display = 'flex';
@@ -2572,6 +3014,52 @@ function createEJSFiles() {
         
         function closeUserModal() {
             document.getElementById('userModal').style.display = 'none';
+        }
+        
+        function addBalanceModal(userId) {
+            document.getElementById('balanceUserId').textContent = userId;
+            document.getElementById('addBalanceModal').style.display = 'flex';
+            window.currentUserId = userId;
+        }
+        
+        function closeAddBalanceModal() {
+            document.getElementById('addBalanceModal').style.display = 'none';
+            document.getElementById('balanceAmount').value = '';
+            document.getElementById('balanceReason').value = '';
+        }
+        
+        function submitAddBalance() {
+            const amount = document.getElementById('balanceAmount').value;
+            const reason = document.getElementById('balanceReason').value;
+            
+            if (!amount || !reason) {
+                alert('Enter amount and reason');
+                return;
+            }
+            
+            fetch('/api/admin/users/' + window.currentUserId + '/add-balance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    amount: parseFloat(amount), 
+                    reason,
+                    userId: adminUserId 
+                })
+            })
+            .then(res => res.json())
+            .then(res => {
+                if (res.success) {
+                    alert('Balance added');
+                    closeAddBalanceModal();
+                    location.reload();
+                } else {
+                    alert(res.error || 'Error adding balance');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error adding balance');
+            });
         }
         
         function addUserBalance() {
@@ -2617,25 +3105,27 @@ function createEJSFiles() {
                 .then(res => res.json())
                 .then(users => {
                     if (users && users.length > 0) {
-                        // Update table with search results
                         const tbody = document.querySelector('#usersTable tbody');
-                        tbody.innerHTML = users.map(user => \`
+                        tbody.innerHTML = users.map(user => `
                             <tr>
-                                <td>\${user.userId}</td>
-                                <td>\${user.fullName || 'N/A'}</td>
-                                <td>₹\${user.balance.toFixed(2)}</td>
-                                <td>\${user.referCode}</td>
-                                <td>\${user.referralCount || 0}</td>
-                                <td>\${user.verified ? '✅' : '❌'}</td>
-                                <td>\${(user.deviceId || '').substring(0, 8)}...</td>
-                                <td>\${new Date(user.createdAt).toLocaleDateString()}</td>
+                                <td>${user.userId}</td>
+                                <td>${user.fullName || 'N/A'}</td>
+                                <td>@${user.username || 'N/A'}</td>
+                                <td>₹${user.balance.toFixed(2)}</td>
+                                <td>${user.referCode}</td>
+                                <td>${user.referralCount || 0}</td>
+                                <td>${user.verified ? '✅' : '❌'}</td>
+                                <td>${new Date(user.createdAt).toLocaleDateString()}</td>
                                 <td>
-                                    <button class="btn btn-primary btn-sm" onclick="viewUser('\${user.userId}')">
+                                    <button class="btn btn-primary btn-sm" onclick="viewUser('${user.userId}')">
                                         <i class="fas fa-eye"></i>
+                                    </button>
+                                    <button class="btn btn-success btn-sm" onclick="addBalanceModal('${user.userId}')">
+                                        <i class="fas fa-plus-circle"></i>
                                     </button>
                                 </td>
                             </tr>
-                        \`).join('');
+                        `).join('');
                     } else {
                         alert('No users found');
                     }
@@ -2653,12 +3143,6 @@ function createEJSFiles() {
         function logout() {
             window.location.href = '/admin-login';
         }
-        
-        // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
-            renderAdmins();
-            renderChannels();
-        });
     </script>
 </body>
 </html>`;
@@ -2681,7 +3165,7 @@ function createEJSFiles() {
         }
         
         body {
-            background: #0f172a;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
             color: white;
             display: flex;
             justify-content: center;
@@ -2691,49 +3175,54 @@ function createEJSFiles() {
         }
         
         .login-container {
-            background: #1e293b;
-            padding: 40px;
-            border-radius: 20px;
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(10px);
+            padding: 50px;
+            border-radius: 30px;
             width: 100%;
-            max-width: 400px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
-            border: 1px solid #334155;
+            max-width: 450px;
+            box-shadow: 0 30px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(96, 165, 250, 0.2);
+            text-align: center;
+        }
+        
+        .logo {
+            width: 100px;
+            height: 100px;
+            background: linear-gradient(135deg, #60a5fa, #34d399);
+            border-radius: 30px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 30px;
+            font-size: 3rem;
+            color: white;
+            box-shadow: 0 10px 30px rgba(96, 165, 250, 0.3);
         }
         
         h1 {
             color: #60a5fa;
-            text-align: center;
             margin-bottom: 30px;
-            font-size: 2rem;
-        }
-        
-        .logo {
-            width: 80px;
-            height: 80px;
-            background: #60a5fa;
-            border-radius: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 20px;
-            font-size: 2.5rem;
+            font-size: 2.2rem;
         }
         
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 25px;
+            text-align: left;
         }
         
         label {
             display: block;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             color: #cbd5e1;
             font-weight: 500;
+            font-size: 0.95rem;
         }
         
         input {
             width: 100%;
-            padding: 15px;
-            border-radius: 10px;
+            padding: 16px 20px;
+            border-radius: 15px;
             border: 1px solid #334155;
             background: #0f172a;
             color: white;
@@ -2744,30 +3233,33 @@ function createEJSFiles() {
         input:focus {
             outline: none;
             border-color: #60a5fa;
-            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+            box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.2);
         }
         
         button {
             width: 100%;
-            padding: 15px;
-            background: #60a5fa;
+            padding: 16px;
+            background: linear-gradient(135deg, #60a5fa, #3b82f6);
             color: white;
             border: none;
-            border-radius: 10px;
-            font-size: 1.1rem;
+            border-radius: 15px;
+            font-size: 1.2rem;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
         }
         
         button:hover {
-            background: #3b82f6;
-            transform: translateY(-2px);
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(96, 165, 250, 0.4);
         }
         
         .info {
-            margin-top: 20px;
-            text-align: center;
+            margin-top: 25px;
             color: #94a3b8;
             font-size: 0.9rem;
         }
@@ -2783,9 +3275,20 @@ function createEJSFiles() {
         
         .error {
             color: #f87171;
-            text-align: center;
-            margin-top: 10px;
+            margin-top: 15px;
+            padding: 12px;
+            background: rgba(248, 113, 113, 0.1);
+            border-radius: 10px;
             display: none;
+        }
+        
+        .demo {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(96, 165, 250, 0.1);
+            border-radius: 12px;
+            font-size: 0.9rem;
+            color: #cbd5e1;
         }
     </style>
 </head>
@@ -2798,7 +3301,7 @@ function createEJSFiles() {
         <h1>Admin Login</h1>
         
         <div class="form-group">
-            <label>Telegram User ID</label>
+            <label><i class="fas fa-user"></i> Telegram User ID</label>
             <input type="text" id="userId" placeholder="Enter your Telegram User ID" value="8469993808">
         </div>
         
@@ -2807,6 +3310,10 @@ function createEJSFiles() {
         </button>
         
         <div class="error" id="errorMsg">Invalid User ID or not authorized</div>
+        
+        <div class="demo">
+            <i class="fas fa-info-circle"></i> Demo Admin ID: <strong>8469993808</strong>
+        </div>
         
         <div class="info">
             <p>Don't know your User ID?</p>
@@ -2850,6 +3357,8 @@ function createEJSFiles() {
 }
 
 createEJSFiles();
+
+// ==========================================
 
 // ==========================================
 // 🤖 BOT SETUP
