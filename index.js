@@ -1,4 +1,4 @@
-
+// index.js - Complete Refer & Earn Bot with Advanced Admin Panel
 const { Telegraf, session: telegrafSession, Markup } = require('telegraf');
 const { MongoClient, ObjectId } = require('mongodb');
 const schedule = require('node-schedule');
@@ -16,8 +16,7 @@ const moment = require('moment-timezone');
 const BOT_TOKEN = '8280352331:AAHQ4EvZlvP6lMY7XgNaCxWEs0lX2B-Iwqs';
 const MONGODB_URI = 'mongodb+srv://sandip:9E9AISFqTfU3VI5i@cluster0.p8irtov.mongodb.net/refer_earn';
 const PORT = process.env.PORT || 8080;
-const WEB_APP_URL = 'https://web-production-41e72.up.railway.app/webapp';
-const ADMIN_IDS = [8469993808]; // Add your admin IDs here
+const WEB_APP_URL = 'https://web-production-41e72.up.railway.app';
 const EASEPAY_API = 'https://easepay.site/upiapi.php?token=0127d8b8b09c9f3c6674dd5d676a6e17&key=25d33a0508f8249ebf03ee2b36cc019e&upiid={upi_id}&amount={amount}';
 
 // ==========================================
@@ -26,7 +25,33 @@ const EASEPAY_API = 'https://easepay.site/upiapi.php?token=0127d8b8b09c9f3c6674d
 const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000;
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = path.join(__dirname, 'uploads');
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only images are allowed'));
+        }
+    }
+});
 
 // ==========================================
 // 📁 DIRECTORY SETUP
@@ -111,12 +136,12 @@ async function connectDB() {
 async function initializeSettings() {
     const defaultSettings = {
         botName: 'Auto VFX Bot',
-        botLogo: 'https://via.placeholder.com/100',
+        botLogo: '', // Will be set when uploaded
         minWithdraw: 50,
         maxWithdraw: 10000,
         referBonus: 10,
         welcomeBonus: 5,
-        withdrawTax: 5, // percentage
+        withdrawTax: 5,
         minGiftAmount: 10,
         maxGiftAmount: 1000,
         
@@ -134,7 +159,7 @@ async function initializeSettings() {
         upiName: '',
         
         // Admin
-        adminIds: ADMIN_IDS
+        adminIds: [8469993808]
     };
     
     for (const [key, value] of Object.entries(defaultSettings)) {
@@ -143,6 +168,60 @@ async function initializeSettings() {
             { $setOnInsert: { value } },
             { upsert: true }
         );
+    }
+}
+
+// ==========================================
+// 🛠️ UTILITY FUNCTIONS
+// ==========================================
+function generateReferCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let code = '';
+    for (let i = 0; i < 5; i++) {
+        code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return code;
+}
+
+function generateDeviceId(req) {
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    return crypto.createHash('sha256').update(ip + userAgent).digest('hex').substring(0, 32);
+}
+
+async function getSettings() {
+    const settings = {};
+    const cursor = db.collection('settings').find();
+    await cursor.forEach(doc => {
+        settings[doc.key] = doc.value;
+    });
+    return settings;
+}
+
+async function safeEdit(ctx, text, keyboard = null) {
+    try {
+        const options = { 
+            parse_mode: 'HTML',
+            ...(keyboard && { reply_markup: keyboard.reply_markup })
+        };
+        await ctx.editMessageText(text, options);
+    } catch (err) {
+        if (err.description && (
+            err.description.includes("message is not modified") || 
+            err.description.includes("message can't be edited")
+        )) {
+            try {
+                const options = { 
+                    parse_mode: 'HTML',
+                    ...(keyboard && { reply_markup: keyboard.reply_markup })
+                };
+                await ctx.reply(text, options);
+            } catch (e) { 
+                console.error('SafeEdit Reply Error:', e.message);
+            }
+            return;
+        }
+        console.error('SafeEdit Error:', err.message);
     }
 }
 
@@ -250,6 +329,7 @@ function createEJSFiles() {
             width: 50px;
             height: 50px;
             border-radius: 12px;
+            object-fit: cover;
         }
         
         .bot-name {
@@ -274,7 +354,7 @@ function createEJSFiles() {
             width: 50px;
             height: 50px;
             border-radius: 50%;
-            background: rgba(255,255,255,0.2);
+            background: rgba(0,0,0,0.2);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -301,12 +381,6 @@ function createEJSFiles() {
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
             position: relative;
             overflow: hidden;
-            animation: shine 3s infinite;
-        }
-        
-        @keyframes shine {
-            0% { background-position: -100% 0; }
-            100% { background-position: 200% 0; }
         }
         
         .credit-card::after {
@@ -318,6 +392,11 @@ function createEJSFiles() {
             height: 100%;
             background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
             animation: shine 3s infinite;
+        }
+        
+        @keyframes shine {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
         }
         
         .card-balance {
@@ -457,6 +536,8 @@ function createEJSFiles() {
             padding: 24px;
             width: 90%;
             max-width: 400px;
+            max-height: 90vh;
+            overflow-y: auto;
         }
         
         .modal-header {
@@ -506,6 +587,11 @@ function createEJSFiles() {
             color: white;
         }
         
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+        
         /* Toast */
         .toast-container {
             position: fixed;
@@ -525,8 +611,8 @@ function createEJSFiles() {
         }
         
         @keyframes slideIn {
-            from { transform: translateX(100%); }
-            to { transform: translateX(0); }
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
         
         /* Loader */
@@ -615,6 +701,12 @@ function createEJSFiles() {
             background: var(--success);
         }
         
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+        
         /* Responsive */
         @media (max-width: 768px) {
             .nav-links {
@@ -660,7 +752,7 @@ function createEJSFiles() {
                 <h3>Contact Admin</h3>
                 <button class="close-btn" onclick="closeModal('contactModal')">&times;</button>
             </div>
-            <form onsubmit="submitContact(event)">
+            <form id="contactForm" onsubmit="submitContact(event)">
                 <div class="form-group">
                     <label>Message</label>
                     <textarea class="form-control" name="message" rows="4" required></textarea>
@@ -690,7 +782,7 @@ function createEJSFiles() {
             <div class="form-group">
                 <label>Tax: <%= settings.withdrawTax %>%</label>
             </div>
-            <form onsubmit="submitWithdraw(event)">
+            <form id="withdrawForm" onsubmit="submitWithdraw(event)">
                 <div class="form-group">
                     <input type="number" class="form-control" name="amount" placeholder="Enter amount" min="<%= settings.minWithdraw %>" max="<%= settings.maxWithdraw %>" required>
                 </div>
@@ -748,9 +840,13 @@ function createEJSFiles() {
         
         function switchPage(page) {
             showLoader();
-            fetch('/api/page/' + page)
+            fetch('/api/page/' + page + '?userId=' + user.userId)
                 .then(res => res.json())
                 .then(data => {
+                    if (data.error) {
+                        showToast(data.error, 'error');
+                        return;
+                    }
                     currentPage = page;
                     user = data.user;
                     transactions = data.transactions || [];
@@ -786,10 +882,11 @@ function createEJSFiles() {
         
         function renderHome() {
             const progress = Math.min(100, (user.balance / settings.minWithdraw) * 100);
+            const logoUrl = settings.botLogo ? settings.botLogo + '?t=' + new Date().getTime() : 'https://via.placeholder.com/100';
             
             return \`
                 <div class="logo-section">
-                    <img src="\${settings.botLogo}" class="logo" alt="logo">
+                    <img src="\${logoUrl}" class="logo" alt="logo" onerror="this.src='https://via.placeholder.com/100'">
                     <span class="bot-name">\${settings.botName}</span>
                 </div>
                 
@@ -798,7 +895,8 @@ function createEJSFiles() {
                         <i class="fas fa-user"></i>
                     </div>
                     <div>
-                        <div>\${user.userId}</div>
+                        <div>\${user.fullName || 'User'}</div>
+                        <div style="font-size: 0.8rem;">ID: \${user.userId}</div>
                         <button class="contact-admin-btn" onclick="openModal('contactModal')">
                             <i class="fas fa-headset"></i> Contact Admin
                         </button>
@@ -807,7 +905,7 @@ function createEJSFiles() {
                 
                 <div class="credit-card">
                     <div>\${user.fullName || 'User'}</div>
-                    <div class="card-balance">₹\${user.balance}</div>
+                    <div class="card-balance">₹\${user.balance.toFixed(2)}</div>
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: \${progress}%"></div>
                     </div>
@@ -832,7 +930,7 @@ function createEJSFiles() {
         
         function renderChannels() {
             if (!channels || channels.length === 0) {
-                return '<div class="channel-item">No channels to join</div>';
+                return '<div class="empty-state">No channels to join</div>';
             }
             
             return channels.map(channel => {
@@ -872,7 +970,7 @@ function createEJSFiles() {
                 <div style="margin-top: 20px;">
                     <h3>Your Referrals (\${referrals.length})</h3>
                     \${referrals.length === 0 ? 
-                        '<div class="history-item">No referrals yet</div>' : 
+                        '<div class="empty-state">No referrals yet</div>' : 
                         referrals.map(ref => \`
                             <div class="history-item">
                                 <div>
@@ -895,7 +993,7 @@ function createEJSFiles() {
             return \`
                 <h3>Transaction History</h3>
                 \${transactions.length === 0 ?
-                    '<div class="history-item">No transactions yet</div>' :
+                    '<div class="empty-state">No transactions yet</div>' :
                     transactions.map(tx => \`
                         <div class="history-item">
                             <div>
@@ -948,7 +1046,11 @@ function createEJSFiles() {
             fetch('/api/withdraw', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ amount, upiId })
+                body: JSON.stringify({ 
+                    userId: user.userId, 
+                    amount, 
+                    upiId 
+                })
             })
             .then(res => res.json())
             .then(data => {
@@ -957,7 +1059,7 @@ function createEJSFiles() {
                     closeModal('withdrawModal');
                     setTimeout(() => switchPage('home'), 1000);
                 } else {
-                    showToast(data.error, 'error');
+                    showToast(data.error || 'Error submitting withdrawal', 'error');
                 }
                 hideLoader();
             })
@@ -971,6 +1073,7 @@ function createEJSFiles() {
         function submitContact(event) {
             event.preventDefault();
             const formData = new FormData(event.target);
+            formData.append('userId', user.userId);
             
             showLoader();
             fetch('/api/contact', {
@@ -982,8 +1085,9 @@ function createEJSFiles() {
                 if (data.success) {
                     showToast('Message sent to admin');
                     closeModal('contactModal');
+                    document.getElementById('contactForm').reset();
                 } else {
-                    showToast(data.error, 'error');
+                    showToast(data.error || 'Error sending message', 'error');
                 }
                 hideLoader();
             })
@@ -1005,7 +1109,10 @@ function createEJSFiles() {
             fetch('/api/claim-gift', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ code })
+                body: JSON.stringify({ 
+                    userId: user.userId, 
+                    code 
+                })
             })
             .then(res => res.json())
             .then(data => {
@@ -1014,7 +1121,7 @@ function createEJSFiles() {
                     createConfetti();
                     setTimeout(() => switchPage('home'), 1000);
                 } else {
-                    showToast(data.error, 'error');
+                    showToast(data.error || 'Invalid gift code', 'error');
                 }
                 hideLoader();
             })
@@ -1032,8 +1139,9 @@ function createEJSFiles() {
                 confetti.style.left = Math.random() * 100 + 'vw';
                 confetti.style.background = \`hsl(\${Math.random() * 360}, 100%, 50%)\`;
                 confetti.style.animationDelay = Math.random() * 2 + 's';
+                confetti.style.animationDuration = (2 + Math.random() * 2) + 's';
                 document.body.appendChild(confetti);
-                setTimeout(() => confetti.remove(), 3000);
+                setTimeout(() => confetti.remove(), 5000);
             }
         }
         
@@ -1041,7 +1149,10 @@ function createEJSFiles() {
             fetch('/api/join-channel', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ channelId })
+                body: JSON.stringify({ 
+                    userId: user.userId, 
+                    channelId 
+                })
             })
             .then(res => res.json())
             .then(data => {
@@ -1049,7 +1160,7 @@ function createEJSFiles() {
                     showToast('Channel joined');
                     switchPage('home');
                 } else {
-                    showToast(data.error, 'error');
+                    showToast(data.error || 'Error joining channel', 'error');
                     if (data.link) {
                         window.open(data.link, '_blank');
                     }
@@ -1076,7 +1187,7 @@ function createEJSFiles() {
 
     fs.writeFileSync(path.join(viewsDir, 'index.ejs'), mainEJS);
 
-    // Admin Panel Template
+    // Advanced Admin Panel Template
     const adminEJS = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1119,6 +1230,9 @@ function createEJSFiles() {
             justify-content: space-between;
             align-items: center;
             margin-bottom: 30px;
+            background: var(--card);
+            padding: 20px;
+            border-radius: 12px;
         }
         
         .nav-tabs {
@@ -1127,15 +1241,16 @@ function createEJSFiles() {
             flex-wrap: wrap;
             margin-bottom: 20px;
             background: var(--card);
-            padding: 10px;
+            padding: 15px;
             border-radius: 12px;
         }
         
         .nav-tab {
-            padding: 10px 20px;
+            padding: 12px 24px;
             border-radius: 8px;
             cursor: pointer;
             transition: all 0.2s;
+            background: var(--bg);
         }
         
         .nav-tab:hover {
@@ -1157,7 +1272,7 @@ function createEJSFiles() {
         
         .cards-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
@@ -1165,8 +1280,19 @@ function createEJSFiles() {
         .stat-card {
             background: var(--card);
             border-radius: 12px;
-            padding: 20px;
+            padding: 25px;
             border: 1px solid var(--border);
+        }
+        
+        .stat-icon {
+            font-size: 2rem;
+            color: var(--accent);
+            margin-bottom: 10px;
+        }
+        
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
         }
         
         .stat-value {
@@ -1175,23 +1301,32 @@ function createEJSFiles() {
             margin-top: 10px;
         }
         
-        .table {
-            width: 100%;
-            border-collapse: collapse;
+        .table-container {
             background: var(--card);
             border-radius: 12px;
-            overflow: hidden;
+            padding: 20px;
+            overflow-x: auto;
         }
         
-        .table th {
-            background: var(--border);
-            padding: 12px;
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            background: var(--bg);
+            padding: 15px;
             text-align: left;
+            font-weight: 600;
         }
         
-        .table td {
-            padding: 12px;
+        td {
+            padding: 15px;
             border-bottom: 1px solid var(--border);
+        }
+        
+        tr:hover {
+            background: var(--bg);
         }
         
         .btn {
@@ -1201,6 +1336,12 @@ function createEJSFiles() {
             cursor: pointer;
             font-weight: 600;
             transition: all 0.2s;
+            margin: 2px;
+        }
+        
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 0.85rem;
         }
         
         .btn-primary {
@@ -1224,16 +1365,21 @@ function createEJSFiles() {
         }
         
         .form-group {
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }
         
         .form-control {
             width: 100%;
-            padding: 10px;
-            border-radius: 6px;
+            padding: 12px;
+            border-radius: 8px;
             border: 1px solid var(--border);
             background: var(--bg);
             color: var(--text);
+            font-size: 1rem;
+        }
+        
+        .form-control:focus {
+            outline: 2px solid var(--accent);
         }
         
         .toggle-switch {
@@ -1297,10 +1443,10 @@ function createEJSFiles() {
         .modal-content {
             background: var(--card);
             border-radius: 12px;
-            padding: 20px;
-            max-width: 500px;
+            padding: 30px;
+            max-width: 600px;
             width: 90%;
-            max-height: 80vh;
+            max-height: 90vh;
             overflow-y: auto;
         }
         
@@ -1333,103 +1479,125 @@ function createEJSFiles() {
             align-items: center;
         }
         
-        .item-actions {
-            display: flex;
-            gap: 5px;
-        }
-        
-        .icon-btn {
-            background: none;
-            border: none;
-            color: var(--text);
-            cursor: pointer;
-            padding: 5px;
+        .badge {
+            background: var(--accent);
+            color: white;
+            padding: 3px 8px;
             border-radius: 4px;
+            font-size: 0.8rem;
         }
         
-        .icon-btn:hover {
-            background: var(--border);
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .search-box input {
+            flex: 1;
+        }
+        
+        @media (max-width: 768px) {
+            .nav-tabs {
+                flex-direction: column;
+            }
+            
+            .nav-tab {
+                width: 100%;
+                text-align: center;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Admin Panel - <%= settings.botName %></h1>
+            <div>
+                <h1>👑 Admin Panel - <%= settings.botName %></h1>
+                <p style="color: var(--text-secondary); margin-top: 5px;">Welcome back, Admin</p>
+            </div>
             <button class="btn btn-danger" onclick="logout()">Logout</button>
         </div>
         
         <div class="nav-tabs">
-            <div class="nav-tab active" onclick="switchTab('dashboard')">Dashboard</div>
-            <div class="nav-tab" onclick="switchTab('withdrawals')">Withdrawals</div>
-            <div class="nav-tab" onclick="switchTab('users')">Users</div>
-            <div class="nav-tab" onclick="switchTab('channels')">Channels</div>
-            <div class="nav-tab" onclick="switchTab('giftCodes')">Gift Codes</div>
-            <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
-            <div class="nav-tab" onclick="switchTab('upi')">UPI Settings</div>
-            <div class="nav-tab" onclick="switchTab('broadcast')">Broadcast</div>
+            <div class="nav-tab active" onclick="switchTab('dashboard')"><i class="fas fa-chart-line"></i> Dashboard</div>
+            <div class="nav-tab" onclick="switchTab('withdrawals')"><i class="fas fa-wallet"></i> Withdrawals</div>
+            <div class="nav-tab" onclick="switchTab('users')"><i class="fas fa-users"></i> Users</div>
+            <div class="nav-tab" onclick="switchTab('channels')"><i class="fas fa-tv"></i> Channels</div>
+            <div class="nav-tab" onclick="switchTab('giftCodes')"><i class="fas fa-gift"></i> Gift Codes</div>
+            <div class="nav-tab" onclick="switchTab('settings')"><i class="fas fa-cog"></i> Settings</div>
+            <div class="nav-tab" onclick="switchTab('upi')"><i class="fas fa-credit-card"></i> UPI Settings</div>
+            <div class="nav-tab" onclick="switchTab('broadcast')"><i class="fas fa-broadcast-tower"></i> Broadcast</div>
         </div>
         
         <!-- Dashboard Tab -->
         <div class="tab-content active" id="dashboard">
             <div class="cards-grid">
                 <div class="stat-card">
-                    <i class="fas fa-users"></i>
-                    <div>Total Users</div>
+                    <div class="stat-icon"><i class="fas fa-users"></i></div>
+                    <div class="stat-label">Total Users</div>
                     <div class="stat-value"><%= stats.totalUsers %></div>
                 </div>
                 <div class="stat-card">
-                    <i class="fas fa-check-circle"></i>
-                    <div>Verified Users</div>
+                    <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
+                    <div class="stat-label">Verified Users</div>
                     <div class="stat-value"><%= stats.verifiedUsers %></div>
                 </div>
                 <div class="stat-card">
-                    <i class="fas fa-wallet"></i>
-                    <div>Total Balance</div>
-                    <div class="stat-value">₹<%= stats.totalBalance %></div>
+                    <div class="stat-icon"><i class="fas fa-rupee-sign"></i></div>
+                    <div class="stat-label">Total Balance</div>
+                    <div class="stat-value">₹<%= stats.totalBalance.toFixed(2) %></div>
                 </div>
                 <div class="stat-card">
-                    <i class="fas fa-clock"></i>
-                    <div>Pending Withdrawals</div>
+                    <div class="stat-icon"><i class="fas fa-clock"></i></div>
+                    <div class="stat-label">Pending Withdrawals</div>
                     <div class="stat-value"><%= stats.pendingWithdrawals %></div>
                 </div>
                 <div class="stat-card">
-                    <i class="fas fa-gift"></i>
-                    <div>Active Gift Codes</div>
+                    <div class="stat-icon"><i class="fas fa-gift"></i></div>
+                    <div class="stat-label">Active Gift Codes</div>
                     <div class="stat-value"><%= stats.activeGiftCodes %></div>
                 </div>
                 <div class="stat-card">
-                    <i class="fas fa-exchange-alt"></i>
-                    <div>Total Transactions</div>
+                    <div class="stat-icon"><i class="fas fa-exchange-alt"></i></div>
+                    <div class="stat-label">Total Transactions</div>
                     <div class="stat-value"><%= stats.totalTransactions %></div>
                 </div>
             </div>
             
-            <h2>Recent Users</h2>
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>User ID</th>
-                        <th>Username</th>
-                        <th>Balance</th>
-                        <th>Verified</th>
-                        <th>Joined</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <% users.slice(0, 10).forEach(user => { %>
-                    <tr>
-                        <td><%= user.userId %></td>
-                        <td><%= user.fullName || 'N/A' %></td>
-                        <td>₹<%= user.balance %></td>
-                        <td><%= user.verified ? '✅' : '❌' %></td>
-                        <td><%= new Date(user.createdAt).toLocaleDateString() %></td>
-                        <td><button class="btn btn-primary" onclick="viewUser('<%= user.userId %>')">View</button></td>
-                    </tr>
-                    <% }) %>
-                </tbody>
-            </table>
+            <div class="table-container">
+                <h2 style="margin-bottom: 20px;">Recent Users</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th>Name</th>
+                            <th>Balance</th>
+                            <th>Refer Code</th>
+                            <th>Verified</th>
+                            <th>Joined</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <% users.slice(0, 10).forEach(user => { %>
+                        <tr>
+                            <td><%= user.userId %></td>
+                            <td><%= user.fullName || 'N/A' %></td>
+                            <td>₹<%= user.balance.toFixed(2) %></td>
+                            <td><%= user.referCode %></td>
+                            <td><%= user.verified ? '✅' : '❌' %></td>
+                            <td><%= new Date(user.createdAt).toLocaleDateString() %></td>
+                            <td>
+                                <button class="btn btn-primary btn-sm" onclick="viewUser('<%= user.userId %>')">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        <% }) %>
+                    </tbody>
+                </table>
+            </div>
         </div>
         
         <!-- Withdrawals Tab -->
@@ -1440,58 +1608,69 @@ function createEJSFiles() {
                 <button class="btn btn-danger" onclick="loadWithdrawals('rejected')">Rejected</button>
             </div>
             
-            <table class="table" id="withdrawalsTable">
-                <thead>
-                    <tr>
-                        <th>User</th>
-                        <th>Amount</th>
-                        <th>UPI ID</th>
-                        <th>Tax</th>
-                        <th>Net Amount</th>
-                        <th>Status</th>
-                        <th>Date</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody id="withdrawalsBody"></tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>User</th>
+                            <th>Amount</th>
+                            <th>Tax</th>
+                            <th>Net</th>
+                            <th>UPI ID</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="withdrawalsBody"></tbody>
+                </table>
+            </div>
         </div>
         
         <!-- Users Tab -->
         <div class="tab-content" id="users">
-            <div style="margin-bottom: 20px;">
-                <input type="text" class="form-control" style="max-width: 300px;" placeholder="Search by User ID" id="searchUser">
+            <div class="search-box">
+                <input type="text" class="form-control" placeholder="Search by User ID, Name, or Refer Code" id="searchUser">
                 <button class="btn btn-primary" onclick="searchUsers()">Search</button>
+                <button class="btn btn-success" onclick="exportUsers()">Export CSV</button>
             </div>
             
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>User ID</th>
-                        <th>Username</th>
-                        <th>Balance</th>
-                        <th>Refer Code</th>
-                        <th>Referrals</th>
-                        <th>Verified</th>
-                        <th>Joined</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <% users.forEach(user => { %>
-                    <tr>
-                        <td><%= user.userId %></td>
-                        <td><%= user.fullName || 'N/A' %></td>
-                        <td>₹<%= user.balance %></td>
-                        <td><%= user.referCode %></td>
-                        <td><%= user.referralCount || 0 %></td>
-                        <td><%= user.verified ? '✅' : '❌' %></td>
-                        <td><%= new Date(user.createdAt).toLocaleDateString() %></td>
-                        <td><button class="btn btn-primary" onclick="viewUser('<%= user.userId %>')">View</button></td>
-                    </tr>
-                    <% }) %>
-                </tbody>
-            </table>
+            <div class="table-container">
+                <table id="usersTable">
+                    <thead>
+                        <tr>
+                            <th>User ID</th>
+                            <th>Name</th>
+                            <th>Balance</th>
+                            <th>Refer Code</th>
+                            <th>Referrals</th>
+                            <th>Verified</th>
+                            <th>Device ID</th>
+                            <th>Joined</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <% users.forEach(user => { %>
+                        <tr>
+                            <td><%= user.userId %></td>
+                            <td><%= user.fullName || 'N/A' %></td>
+                            <td>₹<%= user.balance.toFixed(2) %></td>
+                            <td><%= user.referCode %></td>
+                            <td><%= user.referralCount || 0 %></td>
+                            <td><%= user.verified ? '✅' : '❌' %></td>
+                            <td><%= (user.deviceId || '').substring(0, 8) %>...</td>
+                            <td><%= new Date(user.createdAt).toLocaleDateString() %></td>
+                            <td>
+                                <button class="btn btn-primary btn-sm" onclick="viewUser('<%= user.userId %>')">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </td>
+                        </tr>
+                        <% }) %>
+                    </tbody>
+                </table>
+            </div>
         </div>
         
         <!-- Channels Tab -->
@@ -1500,7 +1679,22 @@ function createEJSFiles() {
                 <i class="fas fa-plus"></i> Add Channel
             </button>
             
-            <div id="channelsList"></div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Position</th>
+                            <th>Name</th>
+                            <th>Channel ID</th>
+                            <th>Button Text</th>
+                            <th>Auto Accept</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="channelsList"></tbody>
+                </table>
+            </div>
         </div>
         
         <!-- Gift Codes Tab -->
@@ -1509,61 +1703,68 @@ function createEJSFiles() {
                 <i class="fas fa-plus"></i> Generate Gift Code
             </button>
             
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>Code</th>
-                        <th>Min Amount</th>
-                        <th>Max Amount</th>
-                        <th>Total Users</th>
-                        <th>Used</th>
-                        <th>Expires</th>
-                        <th>Status</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody id="giftCodesBody"></tbody>
-            </table>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>Min Amount</th>
+                            <th>Max Amount</th>
+                            <th>Total Users</th>
+                            <th>Used</th>
+                            <th>Expires</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="giftCodesBody"></tbody>
+                </table>
+            </div>
         </div>
         
         <!-- Settings Tab -->
         <div class="tab-content" id="settings">
-            <form onsubmit="saveSettings(event)">
+            <form id="settingsForm" onsubmit="saveSettings(event)">
                 <div class="cards-grid">
                     <div class="stat-card">
-                        <h3>Bot Settings</h3>
+                        <h3><i class="fas fa-robot"></i> Bot Settings</h3>
                         <div class="form-group">
                             <label>Bot Name</label>
-                            <input type="text" class="form-control" name="botName" value="<%= settings.botName %>">
+                            <input type="text" class="form-control" name="botName" value="<%= settings.botName %>" required>
                         </div>
                         <div class="form-group">
-                            <label>Bot Logo URL</label>
-                            <input type="url" class="form-control" name="botLogo" value="<%= settings.botLogo %>">
+                            <label>Bot Logo</label>
+                            <input type="file" class="form-control" name="botLogo" accept="image/*" id="botLogo">
+                            <% if (settings.botLogo) { %>
+                                <div style="margin-top: 10px;">
+                                    <img src="<%= settings.botLogo %>" style="width: 50px; height: 50px; border-radius: 10px;" alt="Current Logo">
+                                </div>
+                            <% } %>
                         </div>
                         <div class="form-group">
                             <label>Min Withdraw (₹)</label>
-                            <input type="number" class="form-control" name="minWithdraw" value="<%= settings.minWithdraw %>">
+                            <input type="number" class="form-control" name="minWithdraw" value="<%= settings.minWithdraw %>" min="1" required>
                         </div>
                         <div class="form-group">
                             <label>Max Withdraw (₹)</label>
-                            <input type="number" class="form-control" name="maxWithdraw" value="<%= settings.maxWithdraw %>">
+                            <input type="number" class="form-control" name="maxWithdraw" value="<%= settings.maxWithdraw %>" min="1" required>
                         </div>
                         <div class="form-group">
                             <label>Refer Bonus (₹)</label>
-                            <input type="number" class="form-control" name="referBonus" value="<%= settings.referBonus %>">
+                            <input type="number" class="form-control" name="referBonus" value="<%= settings.referBonus %>" min="0" required>
                         </div>
                         <div class="form-group">
                             <label>Welcome Bonus (₹)</label>
-                            <input type="number" class="form-control" name="welcomeBonus" value="<%= settings.welcomeBonus %>">
+                            <input type="number" class="form-control" name="welcomeBonus" value="<%= settings.welcomeBonus %>" min="0" required>
                         </div>
                         <div class="form-group">
                             <label>Withdraw Tax (%)</label>
-                            <input type="number" class="form-control" name="withdrawTax" value="<%= settings.withdrawTax %>">
+                            <input type="number" class="form-control" name="withdrawTax" value="<%= settings.withdrawTax %>" min="0" max="100" required>
                         </div>
                     </div>
                     
                     <div class="stat-card">
-                        <h3>Toggle Settings</h3>
+                        <h3><i class="fas fa-toggle-on"></i> Toggle Settings</h3>
                         <div class="form-group">
                             <label>Bot Enabled</label>
                             <label class="toggle-switch">
@@ -1609,11 +1810,13 @@ function createEJSFiles() {
                     </div>
                     
                     <div class="stat-card">
-                        <h3>Admin Settings</h3>
+                        <h3><i class="fas fa-user-shield"></i> Admin Settings</h3>
                         <div class="form-group">
                             <label>Add Admin (User ID)</label>
-                            <input type="number" class="form-control" id="newAdminId" placeholder="Enter User ID">
-                            <button type="button" class="btn btn-primary" style="margin-top: 10px;" onclick="addAdmin()">Add Admin</button>
+                            <div class="search-box">
+                                <input type="number" class="form-control" id="newAdminId" placeholder="Enter User ID">
+                                <button type="button" class="btn btn-primary" onclick="addAdmin()">Add</button>
+                            </div>
                         </div>
                         <div class="form-group">
                             <label>Current Admins</label>
@@ -1622,16 +1825,18 @@ function createEJSFiles() {
                     </div>
                 </div>
                 
-                <button type="submit" class="btn btn-success" style="width: 100%;">Save Settings</button>
+                <button type="submit" class="btn btn-success" style="width: 100%; padding: 15px; font-size: 1.1rem;">
+                    <i class="fas fa-save"></i> Save All Settings
+                </button>
             </form>
         </div>
         
         <!-- UPI Settings Tab -->
         <div class="tab-content" id="upi">
-            <form onsubmit="saveUPISettings(event)">
+            <form id="upiForm" onsubmit="saveUPISettings(event)">
                 <div class="cards-grid">
                     <div class="stat-card">
-                        <h3>UPI Settings</h3>
+                        <h3><i class="fas fa-credit-card"></i> UPI Configuration</h3>
                         <div class="form-group">
                             <label>Enable UPI Payments</label>
                             <label class="toggle-switch">
@@ -1641,27 +1846,33 @@ function createEJSFiles() {
                         </div>
                         <div class="form-group">
                             <label>Default UPI ID</label>
-                            <input type="text" class="form-control" name="upiId" value="<%= settings.upiId %>">
+                            <input type="text" class="form-control" name="upiId" value="<%= settings.upiId || '' %>" placeholder="example@okhdfcbank">
                         </div>
                         <div class="form-group">
                             <label>UPI Name</label>
-                            <input type="text" class="form-control" name="upiName" value="<%= settings.upiName %>">
+                            <input type="text" class="form-control" name="upiName" value="<%= settings.upiName || '' %>" placeholder="Account Holder Name">
+                        </div>
+                        <div class="form-group">
+                            <label>API URL</label>
+                            <input type="text" class="form-control" value="<%= EASEPAY_API %>" readonly disabled>
                         </div>
                     </div>
                 </div>
-                <button type="submit" class="btn btn-success">Save UPI Settings</button>
+                <button type="submit" class="btn btn-success" style="width: 100%; padding: 15px;">
+                    <i class="fas fa-save"></i> Save UPI Settings
+                </button>
             </form>
         </div>
         
         <!-- Broadcast Tab -->
         <div class="tab-content" id="broadcast">
-            <form onsubmit="sendBroadcast(event)" enctype="multipart/form-data">
+            <form id="broadcastForm" onsubmit="sendBroadcast(event)" enctype="multipart/form-data">
                 <div class="cards-grid">
                     <div class="stat-card">
-                        <h3>Send Broadcast</h3>
+                        <h3><i class="fas fa-bullhorn"></i> Send Broadcast</h3>
                         <div class="form-group">
                             <label>Message</label>
-                            <textarea class="form-control" name="message" rows="6" required></textarea>
+                            <textarea class="form-control" name="message" rows="6" placeholder="Enter your message here..." required></textarea>
                         </div>
                         <div class="form-group">
                             <label>Image (Optional)</label>
@@ -1669,13 +1880,25 @@ function createEJSFiles() {
                         </div>
                         <div class="form-group">
                             <label>Button Text (Optional)</label>
-                            <input type="text" class="form-control" name="buttonText">
+                            <input type="text" class="form-control" name="buttonText" placeholder="Click Here">
                         </div>
                         <div class="form-group">
                             <label>Button URL (Optional)</label>
-                            <input type="url" class="form-control" name="buttonUrl">
+                            <input type="url" class="form-control" name="buttonUrl" placeholder="https://example.com">
                         </div>
-                        <button type="submit" class="btn btn-primary">Send to All Users</button>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-paper-plane"></i> Send to All Users
+                        </button>
+                    </div>
+                    
+                    <div class="stat-card">
+                        <h3><i class="fas fa-chart-pie"></i> Broadcast Stats</h3>
+                        <div class="stat-value"><%= stats.totalUsers %></div>
+                        <div class="stat-label">Total Recipients</div>
+                        <p style="margin-top: 20px; color: var(--warning);">
+                            <i class="fas fa-exclamation-triangle"></i> 
+                            Broadcasting to all users may take some time depending on the number of users.
+                        </p>
                     </div>
                 </div>
             </form>
@@ -1689,23 +1912,23 @@ function createEJSFiles() {
                 <h3 id="channelModalTitle">Add Channel</h3>
                 <button class="close-btn" onclick="closeChannelModal()">&times;</button>
             </div>
-            <form onsubmit="saveChannel(event)">
+            <form id="channelForm" onsubmit="saveChannel(event)">
                 <input type="hidden" name="channelId" id="channelId">
                 <div class="form-group">
                     <label>Channel Name</label>
                     <input type="text" class="form-control" name="name" id="channelName" required>
                 </div>
                 <div class="form-group">
-                    <label>Channel ID</label>
-                    <input type="text" class="form-control" name="channelId" id="channelChannelId" required>
+                    <label>Channel ID/Username</label>
+                    <input type="text" class="form-control" name="channelId" id="channelChannelId" placeholder="@channel or -100123456789" required>
                 </div>
                 <div class="form-group">
                     <label>Button Text</label>
                     <input type="text" class="form-control" name="buttonText" id="channelButtonText" value="Join Channel">
                 </div>
                 <div class="form-group">
-                    <label>Link</label>
-                    <input type="url" class="form-control" name="link" id="channelLink" required>
+                    <label>Invite Link</label>
+                    <input type="url" class="form-control" name="link" id="channelLink" placeholder="https://t.me/..." required>
                 </div>
                 <div class="form-group">
                     <label>Description</label>
@@ -1727,7 +1950,7 @@ function createEJSFiles() {
                         Enabled
                     </label>
                 </div>
-                <button type="submit" class="btn btn-success">Save</button>
+                <button type="submit" class="btn btn-success">Save Channel</button>
             </form>
         </div>
     </div>
@@ -1739,30 +1962,32 @@ function createEJSFiles() {
                 <h3>Generate Gift Code</h3>
                 <button class="close-btn" onclick="closeGiftModal()">&times;</button>
             </div>
-            <form onsubmit="saveGiftCode(event)">
+            <form id="giftForm" onsubmit="saveGiftCode(event)">
                 <input type="hidden" name="codeId" id="codeId">
                 <div class="form-group">
                     <label>Code (5 digits)</label>
-                    <input type="text" class="form-control" name="code" id="code" maxlength="5" pattern="[A-Z0-9]{5}" required>
-                    <button type="button" class="btn btn-primary" style="margin-top: 5px;" onclick="generateCode()">Generate</button>
+                    <div class="search-box">
+                        <input type="text" class="form-control" name="code" id="code" maxlength="5" pattern="[A-Z0-9]{5}" required>
+                        <button type="button" class="btn btn-primary" onclick="generateCode()">Generate</button>
+                    </div>
                 </div>
                 <div class="form-group">
-                    <label>Min Amount</label>
-                    <input type="number" class="form-control" name="minAmount" id="minAmount" required>
+                    <label>Min Amount (₹)</label>
+                    <input type="number" class="form-control" name="minAmount" id="minAmount" min="1" required>
                 </div>
                 <div class="form-group">
-                    <label>Max Amount</label>
-                    <input type="number" class="form-control" name="maxAmount" id="maxAmount" required>
+                    <label>Max Amount (₹)</label>
+                    <input type="number" class="form-control" name="maxAmount" id="maxAmount" min="1" required>
                 </div>
                 <div class="form-group">
                     <label>Total Users</label>
-                    <input type="number" class="form-control" name="totalUsers" id="totalUsers" required>
+                    <input type="number" class="form-control" name="totalUsers" id="totalUsers" min="1" value="1" required>
                 </div>
                 <div class="form-group">
                     <label>Expiry (minutes)</label>
-                    <input type="number" class="form-control" name="expiryMinutes" id="expiryMinutes" value="1440" required>
+                    <input type="number" class="form-control" name="expiryMinutes" id="expiryMinutes" min="1" value="1440" required>
                 </div>
-                <button type="submit" class="btn btn-success">Save</button>
+                <button type="submit" class="btn btn-success">Generate Code</button>
             </form>
         </div>
     </div>
@@ -1774,29 +1999,40 @@ function createEJSFiles() {
                 <h3>User Details</h3>
                 <button class="close-btn" onclick="closeUserModal()">&times;</button>
             </div>
-            <div id="userDetails"></div>
-            <div style="margin-top: 20px;">
-                <h4>Add Balance</h4>
-                <div class="form-group">
-                    <input type="number" class="form-control" id="addBalanceAmount" placeholder="Amount">
-                    <input type="text" class="form-control" id="addBalanceReason" placeholder="Reason" style="margin-top: 10px;">
-                    <button class="btn btn-primary" style="margin-top: 10px;" onclick="addUserBalance()">Add Balance</button>
-                </div>
+            <div id="userDetails" style="margin-bottom: 20px;"></div>
+            
+            <h4>Add Balance</h4>
+            <div class="form-group">
+                <input type="number" class="form-control" id="addBalanceAmount" placeholder="Amount">
+                <input type="text" class="form-control" id="addBalanceReason" placeholder="Reason" style="margin-top: 10px;">
+                <button class="btn btn-primary" style="margin-top: 10px;" onclick="addUserBalance()">
+                    <i class="fas fa-plus-circle"></i> Add Balance
+                </button>
             </div>
+            
+            <h4 style="margin-top: 20px;">Recent Transactions</h4>
+            <div id="userTransactions" style="max-height: 200px; overflow-y: auto;"></div>
         </div>
     </div>
     
     <script>
-        let currentUserId = null;
+        const urlParams = new URLSearchParams(window.location.search);
+        const adminUserId = urlParams.get('userId');
+        
+        if (!adminUserId) {
+            window.location.href = '/admin-login';
+        }
+        
+        let currentWithdrawalStatus = 'pending';
+        let channels = <%- JSON.stringify(channels || []) %>;
+        let settings = <%- JSON.stringify(settings) %>;
         let withdrawals = [];
         let giftCodes = [];
-        let channels = <%- JSON.stringify(channels) %>;
-        let settings = <%- JSON.stringify(settings) %>;
         
         function switchTab(tab) {
             document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelector('.nav-tab[onclick*="' + tab + '"]').classList.add('active');
+            document.querySelector('.nav-tab[onclick="switchTab(\'' + tab + '\')"]').classList.add('active');
             document.getElementById(tab).classList.add('active');
             
             if (tab === 'withdrawals') loadWithdrawals('pending');
@@ -1806,29 +2042,40 @@ function createEJSFiles() {
         }
         
         function loadWithdrawals(status) {
-            fetch('/api/admin/withdrawals?status=' + status)
+            currentWithdrawalStatus = status;
+            fetch('/api/admin/withdrawals?status=' + status + '&userId=' + adminUserId)
                 .then(res => res.json())
                 .then(data => {
                     withdrawals = data;
                     renderWithdrawals();
+                })
+                .catch(err => {
+                    console.error(err);
+                    alert('Error loading withdrawals');
                 });
         }
         
         function renderWithdrawals() {
             const tbody = document.getElementById('withdrawalsBody');
+            if (!tbody) return;
+            
             tbody.innerHTML = withdrawals.map(w => \`
                 <tr>
                     <td>\${w.userId}</td>
                     <td>₹\${w.amount}</td>
-                    <td>\${w.upiId}</td>
                     <td>₹\${w.tax}</td>
                     <td>₹\${w.netAmount}</td>
-                    <td>\${w.status}</td>
+                    <td>\${w.upiId}</td>
+                    <td><span class="badge" style="background: \${w.status === 'pending' ? 'var(--warning)' : w.status === 'completed' ? 'var(--success)' : 'var(--danger)'}">\${w.status}</span></td>
                     <td>\${new Date(w.createdAt).toLocaleString()}</td>
                     <td>
                         \${w.status === 'pending' ? \`
-                            <button class="btn btn-success" onclick="acceptWithdrawal('\${w._id}')">Accept</button>
-                            <button class="btn btn-danger" onclick="rejectWithdrawal('\${w._id}')">Reject</button>
+                            <button class="btn btn-success btn-sm" onclick="acceptWithdrawal('\${w._id}')">
+                                <i class="fas fa-check"></i>
+                            </button>
+                            <button class="btn btn-danger btn-sm" onclick="rejectWithdrawal('\${w._id}')">
+                                <i class="fas fa-times"></i>
+                            </button>
                         \` : ''}
                     </td>
                 </tr>
@@ -1838,57 +2085,76 @@ function createEJSFiles() {
         function acceptWithdrawal(id) {
             if (!confirm('Accept this withdrawal?')) return;
             
-            fetch('/api/admin/withdrawals/' + id + '/accept', { method: 'POST' })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('Withdrawal accepted');
-                        loadWithdrawals('pending');
-                    } else {
-                        alert(data.error);
-                    }
-                });
+            fetch('/api/admin/withdrawals/' + id + '/accept', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: adminUserId })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Withdrawal accepted' + (data.paymentSuccess ? ' and payment sent' : ''));
+                    loadWithdrawals(currentWithdrawalStatus);
+                } else {
+                    alert(data.error || 'Error accepting withdrawal');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error accepting withdrawal');
+            });
         }
         
         function rejectWithdrawal(id) {
             if (!confirm('Reject this withdrawal?')) return;
             
-            fetch('/api/admin/withdrawals/' + id + '/reject', { method: 'POST' })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('Withdrawal rejected');
-                        loadWithdrawals('pending');
-                    } else {
-                        alert(data.error);
-                    }
-                });
+            fetch('/api/admin/withdrawals/' + id + '/reject', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: adminUserId })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Withdrawal rejected');
+                    loadWithdrawals(currentWithdrawalStatus);
+                } else {
+                    alert(data.error || 'Error rejecting withdrawal');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error rejecting withdrawal');
+            });
         }
         
         function renderChannels() {
-            const list = document.getElementById('channelsList');
-            list.innerHTML = channels.sort((a, b) => a.position - b.position).map(c => \`
-                <div class="item-card">
-                    <div>
-                        <strong>\${c.name}</strong>
-                        <div>\${c.description || ''}</div>
-                        <small>Position: \${c.position}</small>
-                    </div>
-                    <div class="item-actions">
-                        <button class="icon-btn" onclick="editChannel('\${c.channelId}')">
+            const tbody = document.getElementById('channelsList');
+            if (!tbody) return;
+            
+            tbody.innerHTML = channels.sort((a, b) => (a.position || 0) - (b.position || 0)).map(c => \`
+                <tr>
+                    <td>\${c.position || 0}</td>
+                    <td>\${c.name}</td>
+                    <td>\${c.channelId}</td>
+                    <td>\${c.buttonText || 'Join Channel'}</td>
+                    <td>\${c.autoAccept ? '✅' : '❌'}</td>
+                    <td>\${c.enabled !== false ? '✅' : '❌'}</td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" onclick="editChannel('\${c._id}')">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button class="icon-btn" onclick="deleteChannel('\${c.channelId}')">
+                        <button class="btn btn-danger btn-sm" onclick="deleteChannel('\${c._id}')">
                             <i class="fas fa-trash"></i>
                         </button>
-                        <button class="icon-btn" onclick="moveChannel('\${c.channelId}', 'up')">
+                        <button class="btn btn-warning btn-sm" onclick="moveChannel('\${c._id}', 'up')">
                             <i class="fas fa-arrow-up"></i>
                         </button>
-                        <button class="icon-btn" onclick="moveChannel('\${c.channelId}', 'down')">
+                        <button class="btn btn-warning btn-sm" onclick="moveChannel('\${c._id}', 'down')">
                             <i class="fas fa-arrow-down"></i>
                         </button>
-                    </div>
-                </div>
+                    </td>
+                </tr>
             \`).join('');
         }
         
@@ -1916,6 +2182,7 @@ function createEJSFiles() {
             const data = Object.fromEntries(formData);
             data.enabled = formData.get('enabled') === 'on';
             data.autoAccept = formData.get('autoAccept') === 'on';
+            data.userId = adminUserId;
             
             fetch('/api/admin/channels', {
                 method: 'POST',
@@ -1929,17 +2196,21 @@ function createEJSFiles() {
                     closeChannelModal();
                     location.reload();
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error saving channel');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error saving channel');
             });
         }
         
         function editChannel(id) {
-            const channel = channels.find(c => c.channelId === id);
+            const channel = channels.find(c => c._id === id);
             if (!channel) return;
             
             document.getElementById('channelModalTitle').innerText = 'Edit Channel';
-            document.getElementById('channelId').value = channel._id || '';
+            document.getElementById('channelId').value = channel._id;
             document.getElementById('channelName').value = channel.name;
             document.getElementById('channelChannelId').value = channel.channelId;
             document.getElementById('channelButtonText').value = channel.buttonText || 'Join Channel';
@@ -1954,39 +2225,49 @@ function createEJSFiles() {
         function deleteChannel(id) {
             if (!confirm('Delete this channel?')) return;
             
-            fetch('/api/admin/channels/' + id, { method: 'DELETE' })
-                .then(res => res.json())
-                .then(res => {
-                    if (res.success) {
-                        alert('Channel deleted');
-                        location.reload();
-                    } else {
-                        alert(res.error);
-                    }
-                });
+            fetch('/api/admin/channels/' + id + '?userId=' + adminUserId, { 
+                method: 'DELETE' 
+            })
+            .then(res => res.json())
+            .then(res => {
+                if (res.success) {
+                    alert('Channel deleted');
+                    location.reload();
+                } else {
+                    alert(res.error || 'Error deleting channel');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error deleting channel');
+            });
         }
         
         function moveChannel(id, direction) {
             fetch('/api/admin/channels/' + id + '/move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ direction })
+                body: JSON.stringify({ direction, userId: adminUserId })
             })
             .then(res => res.json())
             .then(res => {
                 if (res.success) {
                     location.reload();
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error moving channel');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error moving channel');
             });
         }
         
         function openGiftModal() {
             document.getElementById('codeId').value = '';
             document.getElementById('code').value = '';
-            document.getElementById('minAmount').value = settings.minGiftAmount;
-            document.getElementById('maxAmount').value = settings.maxGiftAmount;
+            document.getElementById('minAmount').value = settings.minGiftAmount || 10;
+            document.getElementById('maxAmount').value = settings.maxGiftAmount || 1000;
             document.getElementById('totalUsers').value = 1;
             document.getElementById('expiryMinutes').value = 1440;
             document.getElementById('giftModal').style.display = 'flex';
@@ -2006,28 +2287,35 @@ function createEJSFiles() {
         }
         
         function loadGiftCodes() {
-            fetch('/api/admin/gift-codes')
+            fetch('/api/admin/gift-codes?userId=' + adminUserId)
                 .then(res => res.json())
                 .then(data => {
                     giftCodes = data;
                     renderGiftCodes();
+                })
+                .catch(err => {
+                    console.error(err);
+                    alert('Error loading gift codes');
                 });
         }
         
         function renderGiftCodes() {
             const tbody = document.getElementById('giftCodesBody');
+            if (!tbody) return;
+            
             tbody.innerHTML = giftCodes.map(g => \`
                 <tr>
-                    <td>\${g.code}</td>
+                    <td><strong>\${g.code}</strong></td>
                     <td>₹\${g.minAmount}</td>
                     <td>₹\${g.maxAmount}</td>
                     <td>\${g.totalUsers}</td>
                     <td>\${g.usedCount || 0}</td>
                     <td>\${new Date(g.expiresAt).toLocaleString()}</td>
-                    <td>\${new Date() > new Date(g.expiresAt) ? 'Expired' : 'Active'}</td>
+                    <td><span class="badge" style="background: \${new Date() > new Date(g.expiresAt) ? 'var(--danger)' : 'var(--success)'}">\${new Date() > new Date(g.expiresAt) ? 'Expired' : 'Active'}</span></td>
                     <td>
-                        <button class="btn btn-warning" onclick="editGiftCode('\${g._id}')">Edit</button>
-                        <button class="btn btn-danger" onclick="deleteGiftCode('\${g._id}')">Delete</button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteGiftCode('\${g._id}')">
+                            <i class="fas fa-trash"></i>
+                        </button>
                     </td>
                 </tr>
             \`).join('');
@@ -2037,6 +2325,7 @@ function createEJSFiles() {
             event.preventDefault();
             const formData = new FormData(event.target);
             const data = Object.fromEntries(formData);
+            data.userId = adminUserId;
             
             fetch('/api/admin/gift-codes', {
                 method: 'POST',
@@ -2046,41 +2335,38 @@ function createEJSFiles() {
             .then(res => res.json())
             .then(res => {
                 if (res.success) {
-                    alert('Gift code saved');
+                    alert('Gift code generated');
                     closeGiftModal();
                     loadGiftCodes();
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error generating gift code');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error generating gift code');
             });
-        }
-        
-        function editGiftCode(id) {
-            const code = giftCodes.find(g => g._id === id);
-            if (!code) return;
-            
-            document.getElementById('codeId').value = code._id;
-            document.getElementById('code').value = code.code;
-            document.getElementById('minAmount').value = code.minAmount;
-            document.getElementById('maxAmount').value = code.maxAmount;
-            document.getElementById('totalUsers').value = code.totalUsers;
-            document.getElementById('expiryMinutes').value = 1440; // Not stored, just default
-            document.getElementById('giftModal').style.display = 'flex';
         }
         
         function deleteGiftCode(id) {
             if (!confirm('Delete this gift code?')) return;
             
-            fetch('/api/admin/gift-codes/' + id, { method: 'DELETE' })
-                .then(res => res.json())
-                .then(res => {
-                    if (res.success) {
-                        alert('Gift code deleted');
-                        loadGiftCodes();
-                    } else {
-                        alert(res.error);
-                    }
-                });
+            fetch('/api/admin/gift-codes/' + id + '?userId=' + adminUserId, { 
+                method: 'DELETE' 
+            })
+            .then(res => res.json())
+            .then(res => {
+                if (res.success) {
+                    alert('Gift code deleted');
+                    loadGiftCodes();
+                } else {
+                    alert(res.error || 'Error deleting gift code');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error deleting gift code');
+            });
         }
         
         function saveSettings(event) {
@@ -2088,12 +2374,45 @@ function createEJSFiles() {
             const formData = new FormData(event.target);
             const data = {};
             
+            // Handle file upload separately
+            const logoFile = formData.get('botLogo');
+            if (logoFile && logoFile.size > 0) {
+                const logoFormData = new FormData();
+                logoFormData.append('logo', logoFile);
+                logoFormData.append('userId', adminUserId);
+                
+                fetch('/api/admin/upload-logo', {
+                    method: 'POST',
+                    body: logoFormData
+                })
+                .then(res => res.json())
+                .then(res => {
+                    if (res.success) {
+                        data.botLogo = res.url;
+                    }
+                    saveSettingsData(formData, data);
+                })
+                .catch(err => {
+                    console.error(err);
+                    saveSettingsData(formData, data);
+                });
+            } else {
+                saveSettingsData(formData, data);
+            }
+        }
+        
+        function saveSettingsData(formData, additionalData = {}) {
+            const data = { ...additionalData, userId: adminUserId };
+            
             for (const [key, value] of formData.entries()) {
-                if (key === 'botEnabled' || key === 'deviceVerification' || key === 'autoWithdraw' || 
-                    key === 'withdrawalsEnabled' || key === 'channelVerification' || key === 'autoAcceptPrivate') {
-                    data[key] = value === 'on';
-                } else {
-                    data[key] = value;
+                if (key !== 'botLogo') {
+                    if (key === 'botEnabled' || key === 'deviceVerification' || key === 'autoWithdraw' || 
+                        key === 'withdrawalsEnabled' || key === 'channelVerification' || key === 'autoAcceptPrivate' ||
+                        key === 'upiEnabled') {
+                        data[key] = value === 'on';
+                    } else {
+                        data[key] = value;
+                    }
                 }
             }
             
@@ -2107,8 +2426,12 @@ function createEJSFiles() {
                 if (res.success) {
                     alert('Settings saved');
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error saving settings');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error saving settings');
             });
         }
         
@@ -2116,6 +2439,7 @@ function createEJSFiles() {
             event.preventDefault();
             const formData = new FormData(event.target);
             const data = {
+                userId: adminUserId,
                 upiEnabled: formData.get('upiEnabled') === 'on',
                 upiId: formData.get('upiId'),
                 upiName: formData.get('upiName')
@@ -2131,15 +2455,21 @@ function createEJSFiles() {
                 if (res.success) {
                     alert('UPI settings saved');
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error saving UPI settings');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error saving UPI settings');
             });
         }
         
         function renderAdmins() {
             const list = document.getElementById('adminsList');
-            list.innerHTML = settings.adminIds.map(id => \`
-                <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+            if (!list) return;
+            
+            list.innerHTML = (settings.adminIds || []).map(id => \`
+                <div style="display: flex; justify-content: space-between; align-items: center; background: var(--bg); padding: 10px; border-radius: 8px; margin-bottom: 5px;">
                     <span>\${id}</span>
                     <button class="btn btn-danger btn-sm" onclick="removeAdmin('\${id}')">Remove</button>
                 </div>
@@ -2150,11 +2480,19 @@ function createEJSFiles() {
             const newId = document.getElementById('newAdminId').value;
             if (!newId) return;
             
-            settings.adminIds.push(parseInt(newId));
-            renderAdmins();
+            if (!settings.adminIds) settings.adminIds = [];
+            if (!settings.adminIds.includes(parseInt(newId))) {
+                settings.adminIds.push(parseInt(newId));
+                renderAdmins();
+            }
+            document.getElementById('newAdminId').value = '';
         }
         
         function removeAdmin(id) {
+            if (id == adminUserId) {
+                alert('You cannot remove yourself');
+                return;
+            }
             settings.adminIds = settings.adminIds.filter(a => a != id);
             renderAdmins();
         }
@@ -2162,8 +2500,9 @@ function createEJSFiles() {
         function sendBroadcast(event) {
             event.preventDefault();
             const formData = new FormData(event.target);
+            formData.append('userId', adminUserId);
             
-            if (!confirm('Send broadcast to all users?')) return;
+            if (!confirm('Send broadcast to all ' + <%= stats.totalUsers %> + ' users?')) return;
             
             fetch('/api/admin/broadcast', {
                 method: 'POST',
@@ -2173,30 +2512,59 @@ function createEJSFiles() {
             .then(res => {
                 if (res.success) {
                     alert('Broadcast sent to ' + res.sent + ' users');
+                    document.getElementById('broadcastForm').reset();
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error sending broadcast');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error sending broadcast');
             });
         }
         
         function viewUser(userId) {
-            currentUserId = userId;
-            fetch('/api/admin/users/' + userId)
+            fetch('/api/admin/users/' + userId + '?userId=' + adminUserId)
                 .then(res => res.json())
                 .then(user => {
                     document.getElementById('userDetails').innerHTML = \`
                         <p><strong>User ID:</strong> \${user.userId}</p>
-                        <p><strong>Username:</strong> \${user.fullName || 'N/A'}</p>
-                        <p><strong>Balance:</strong> ₹\${user.balance}</p>
+                        <p><strong>Name:</strong> \${user.fullName || 'N/A'}</p>
+                        <p><strong>Username:</strong> @\${user.username || 'N/A'}</p>
+                        <p><strong>Balance:</strong> ₹\${user.balance.toFixed(2)}</p>
                         <p><strong>Refer Code:</strong> \${user.referCode}</p>
                         <p><strong>Referrals:</strong> \${user.referralCount || 0}</p>
-                        <p><strong>Verified:</strong> \${user.verified ? 'Yes' : 'No'}</p>
+                        <p><strong>Verified:</strong> \${user.verified ? '✅' : '❌'}</p>
                         <p><strong>Device ID:</strong> \${user.deviceId || 'N/A'}</p>
                         <p><strong>IP:</strong> \${user.ip || 'N/A'}</p>
                         <p><strong>Joined:</strong> \${new Date(user.createdAt).toLocaleString()}</p>
                         <p><strong>Channels Joined:</strong> \${(user.joinedChannels || []).length}</p>
                     \`;
+                    
+                    // Load transactions
+                    fetch('/api/admin/users/' + userId + '/transactions?userId=' + adminUserId)
+                        .then(res => res.json())
+                        .then(transactions => {
+                            const txDiv = document.getElementById('userTransactions');
+                            txDiv.innerHTML = transactions.map(tx => \`
+                                <div style="background: var(--bg); padding: 10px; border-radius: 8px; margin-bottom: 5px;">
+                                    <div>\${tx.description}</div>
+                                    <div style="display: flex; justify-content: space-between;">
+                                        <span style="color: var(--text-secondary);">\${new Date(tx.createdAt).toLocaleString()}</span>
+                                        <span style="color: \${tx.type === 'credit' ? 'var(--success)' : 'var(--danger)'}; font-weight: bold;">
+                                            \${tx.type === 'credit' ? '+' : '-'} ₹\${tx.amount}
+                                        </span>
+                                    </div>
+                                </div>
+                            \`).join('');
+                        });
+                    
                     document.getElementById('userModal').style.display = 'flex';
+                    window.currentUserId = userId;
+                })
+                .catch(err => {
+                    console.error(err);
+                    alert('Error loading user details');
                 });
         }
         
@@ -2213,19 +2581,29 @@ function createEJSFiles() {
                 return;
             }
             
-            fetch('/api/admin/users/' + currentUserId + '/add-balance', {
+            fetch('/api/admin/users/' + window.currentUserId + '/add-balance', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ amount: parseFloat(amount), reason })
+                body: JSON.stringify({ 
+                    amount: parseFloat(amount), 
+                    reason,
+                    userId: adminUserId 
+                })
             })
             .then(res => res.json())
             .then(res => {
                 if (res.success) {
                     alert('Balance added');
-                    viewUser(currentUserId);
+                    viewUser(window.currentUserId);
+                    document.getElementById('addBalanceAmount').value = '';
+                    document.getElementById('addBalanceReason').value = '';
                 } else {
-                    alert(res.error);
+                    alert(res.error || 'Error adding balance');
                 }
+            })
+            .catch(err => {
+                console.error(err);
+                alert('Error adding balance');
             });
         }
         
@@ -2233,94 +2611,243 @@ function createEJSFiles() {
             const query = document.getElementById('searchUser').value;
             if (!query) return;
             
-            fetch('/api/admin/users/search?q=' + query)
+            fetch('/api/admin/users/search?q=' + encodeURIComponent(query) + '&userId=' + adminUserId)
                 .then(res => res.json())
-                .then(user => {
-                    if (user) {
-                        viewUser(user.userId);
+                .then(users => {
+                    if (users && users.length > 0) {
+                        // Update table with search results
+                        const tbody = document.querySelector('#usersTable tbody');
+                        tbody.innerHTML = users.map(user => \`
+                            <tr>
+                                <td>\${user.userId}</td>
+                                <td>\${user.fullName || 'N/A'}</td>
+                                <td>₹\${user.balance.toFixed(2)}</td>
+                                <td>\${user.referCode}</td>
+                                <td>\${user.referralCount || 0}</td>
+                                <td>\${user.verified ? '✅' : '❌'}</td>
+                                <td>\${(user.deviceId || '').substring(0, 8)}...</td>
+                                <td>\${new Date(user.createdAt).toLocaleDateString()}</td>
+                                <td>
+                                    <button class="btn btn-primary btn-sm" onclick="viewUser('\${user.userId}')">
+                                        <i class="fas fa-eye"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                        \`).join('');
                     } else {
-                        alert('User not found');
+                        alert('No users found');
                     }
+                })
+                .catch(err => {
+                    console.error(err);
+                    alert('Error searching users');
                 });
         }
         
-        function logout() {
-            window.location.href = '/';
+        function exportUsers() {
+            window.location.href = '/api/admin/export-users?userId=' + adminUserId;
         }
+        
+        function logout() {
+            window.location.href = '/admin-login';
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            renderAdmins();
+            renderChannels();
+        });
     </script>
 </body>
 </html>`;
 
     fs.writeFileSync(path.join(viewsDir, 'admin.ejs'), adminEJS);
     
-    console.log('✅ EJS templates created');
+    // Admin Login Page
+    const adminLoginEJS = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+        
+        body {
+            background: #0f172a;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .login-container {
+            background: #1e293b;
+            padding: 40px;
+            border-radius: 20px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+            border: 1px solid #334155;
+        }
+        
+        h1 {
+            color: #60a5fa;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2rem;
+        }
+        
+        .logo {
+            width: 80px;
+            height: 80px;
+            background: #60a5fa;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 2.5rem;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #cbd5e1;
+            font-weight: 500;
+        }
+        
+        input {
+            width: 100%;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #0f172a;
+            color: white;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #60a5fa;
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+        }
+        
+        button {
+            width: 100%;
+            padding: 15px;
+            background: #60a5fa;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        button:hover {
+            background: #3b82f6;
+            transform: translateY(-2px);
+        }
+        
+        .info {
+            margin-top: 20px;
+            text-align: center;
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        
+        .info a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+        
+        .info a:hover {
+            text-decoration: underline;
+        }
+        
+        .error {
+            color: #f87171;
+            text-align: center;
+            margin-top: 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo">
+            <i class="fas fa-crown"></i>
+        </div>
+        
+        <h1>Admin Login</h1>
+        
+        <div class="form-group">
+            <label>Telegram User ID</label>
+            <input type="text" id="userId" placeholder="Enter your Telegram User ID" value="8469993808">
+        </div>
+        
+        <button onclick="login()">
+            <i class="fas fa-sign-in-alt"></i> Access Admin Panel
+        </button>
+        
+        <div class="error" id="errorMsg">Invalid User ID or not authorized</div>
+        
+        <div class="info">
+            <p>Don't know your User ID?</p>
+            <p>Message <a href="https://t.me/userinfobot" target="_blank">@userinfobot</a> on Telegram</p>
+        </div>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    <script>
+        function login() {
+            const userId = document.getElementById('userId').value.trim();
+            if (!userId) {
+                showError('Please enter User ID');
+                return;
+            }
+            
+            window.location.href = '/admin?userId=' + userId;
+        }
+        
+        function showError(msg) {
+            const errorEl = document.getElementById('errorMsg');
+            errorEl.style.display = 'block';
+            errorEl.textContent = msg;
+            setTimeout(() => {
+                errorEl.style.display = 'none';
+            }, 3000);
+        }
+        
+        // Check URL for error param
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('error')) {
+            showError('Unauthorized access');
+        }
+    </script>
+</body>
+</html>`;
+
+    fs.writeFileSync(path.join(viewsDir, 'admin-login.ejs'), adminLoginEJS);
+    
+    console.log('✅ All EJS templates created successfully');
 }
 
 createEJSFiles();
-
-// ==========================================
-// 🛠️ UTILITY FUNCTIONS
-// ==========================================
-function generateReferCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    let code = '';
-    for (let i = 0; i < 5; i++) {
-        code += chars[Math.floor(Math.random() * chars.length)];
-    }
-    return code;
-}
-
-function generateDeviceId(req) {
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    const userAgent = req.headers['user-agent'];
-    const timestamp = Date.now();
-    return crypto.createHash('sha256').update(ip + userAgent + timestamp).digest('hex').substring(0, 32);
-}
-
-async function checkDeviceVerification(req, userId) {
-    const settings = await db.collection('settings').findOne({ key: 'deviceVerification' });
-    if (!settings || !settings.value) return true;
-    
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    const deviceId = generateDeviceId(req);
-    
-    const existingUser = await db.collection('users').findOne({
-        $or: [
-            { deviceId, userId: { $ne: userId } },
-            { ip, userId: { $ne: userId } }
-        ]
-    });
-    
-    return !existingUser;
-}
-
-async function checkChannelMembership(ctx, userId, channelId) {
-    try {
-        const chatMember = await ctx.telegram.getChatMember(channelId, userId);
-        return ['member', 'administrator', 'creator'].includes(chatMember.status);
-    } catch (error) {
-        console.error('Channel membership check error:', error);
-        return false;
-    }
-}
-
-async function processAutoWithdraw(amount, upiId) {
-    try {
-        const settings = await db.collection('settings').findOne({ key: 'autoWithdraw' });
-        if (!settings || !settings.value) return false;
-        
-        const upiSettings = await db.collection('settings').findOne({ key: 'upiEnabled' });
-        if (!upiSettings || !upiSettings.value) return false;
-        
-        const apiUrl = EASEPAY_API.replace('{upi_id}', upiId).replace('{amount}', amount);
-        const response = await axios.get(apiUrl);
-        
-        return response.data && response.data.status === 'success';
-    } catch (error) {
-        console.error('Auto withdraw error:', error);
-        return false;
-    }
-}
 
 // ==========================================
 // 🤖 BOT SETUP
@@ -2334,8 +2861,8 @@ bot.use(async (ctx, next) => {
     if (!ctx.from) return next();
     
     try {
-        const settings = await db.collection('settings').findOne({ key: 'botEnabled' });
-        if (settings && !settings.value) {
+        const settings = await getSettings();
+        if (settings.botEnabled === false) {
             await ctx.reply('❌ Bot is currently disabled. Please try again later.');
             return;
         }
@@ -2363,23 +2890,26 @@ bot.command('start', async (ctx) => {
         if (!user) {
             // Device verification
             const ip = ctx.message?.chat?.id ? ctx.from.id.toString() : 'unknown';
-            const deviceId = generateDeviceId({ headers: { 'x-forwarded-for': ip }, socket: { remoteAddress: ip } });
+            const deviceId = crypto.createHash('sha256').update(ip + Date.now()).digest('hex').substring(0, 32);
             
-            const existingDevice = await db.collection('users').findOne({
-                $or: [
-                    { deviceId },
-                    { ip }
-                ]
-            });
+            const settings = await getSettings();
             
-            const settings = await db.collection('settings').findOne({ key: 'deviceVerification' });
-            if (settings && settings.value && existingDevice) {
-                return ctx.reply('❌ This device has already been used. Only one account per device is allowed.');
+            if (settings.deviceVerification) {
+                const existingDevice = await db.collection('users').findOne({
+                    $or: [
+                        { deviceId },
+                        { ip }
+                    ]
+                });
+                
+                if (existingDevice) {
+                    return ctx.reply('❌ This device has already been used. Only one account per device is allowed.');
+                }
             }
             
             // Create new user
             const referCode = generateReferCode();
-            const welcomeBonus = (await db.collection('settings').findOne({ key: 'welcomeBonus' }))?.value || 5;
+            const welcomeBonus = settings.welcomeBonus || 5;
             
             user = {
                 userId,
@@ -2408,8 +2938,8 @@ bot.command('start', async (ctx) => {
             });
             
             // Process referral if exists
-            if (referrerCode) {
-                const referrer = await db.collection('users').findOne({ referCode: referrerCode });
+            if (referrerCode && referrerCode !== referCode) {
+                const referrer = await db.collection('users').findOne({ referCode: referrerCode.toUpperCase() });
                 if (referrer && referrer.userId !== userId) {
                     await db.collection('referrals').insertOne({
                         referrerId: referrer.userId,
@@ -2419,7 +2949,6 @@ bot.command('start', async (ctx) => {
                         verified: false
                     });
                     
-                    user.referredBy = referrer.userId;
                     await db.collection('users').updateOne(
                         { userId },
                         { $set: { referredBy: referrer.userId } }
@@ -2441,10 +2970,7 @@ async function showChannels(ctx, user) {
     const channels = await db.collection('channels').find({ enabled: true }).sort({ position: 1 }).toArray();
     const settings = await getSettings();
     
-    if (!settings.channelVerification || channels.length === 0) {
-        // Skip channels if disabled or no channels
-        user.verified = true;
-        await db.collection('users').updateOne({ userId: user.userId }, { $set: { verified: true } });
+    if (!settings.channelVerification || channels.length === 0 || user.verified) {
         return showMainMenu(ctx, user);
     }
     
@@ -2453,23 +2979,23 @@ async function showChannels(ctx, user) {
 
 Please join all the channels below to continue:
 
-You will earn ₹${settings.welcomeBonus} welcome bonus after verification.
+💰 You will earn ₹${settings.welcomeBonus} welcome bonus after verification.
     `;
     
     const buttons = [];
     
     for (const channel of channels) {
-        const joined = user.joinedChannels.includes(channel.channelId);
+        const joined = user.joinedChannels && user.joinedChannels.includes(channel.channelId);
         buttons.push([
             Markup.button.url(channel.buttonText || 'Join Channel', channel.link),
             Markup.button.callback(
-                joined ? '✅ Joined' : 'Verify',
-                `verify_channel_${channel.channelId}`
+                joined ? '✅ Joined' : '✓ Verify',
+                `verify_${channel.channelId}`
             )
         ]);
     }
     
-    buttons.push([Markup.button.callback('✅ Check All', 'check_all_channels')]);
+    buttons.push([Markup.button.callback('✅ Check All', 'check_all')]);
     
     await ctx.reply(text, {
         parse_mode: 'HTML',
@@ -2477,7 +3003,7 @@ You will earn ₹${settings.welcomeBonus} welcome bonus after verification.
     });
 }
 
-bot.action(/^verify_channel_(.+)$/, async (ctx) => {
+bot.action(/^verify_(.+)$/, async (ctx) => {
     const channelId = ctx.match[1];
     const userId = ctx.from.id;
     
@@ -2487,7 +3013,14 @@ bot.action(/^verify_channel_(.+)$/, async (ctx) => {
             return ctx.answerCbQuery('❌ Channel not found');
         }
         
-        const isMember = await checkChannelMembership(ctx, userId, channelId);
+        // Check membership
+        let isMember = false;
+        try {
+            const chatMember = await ctx.telegram.getChatMember(channelId, userId);
+            isMember = ['member', 'administrator', 'creator'].includes(chatMember.status);
+        } catch (e) {
+            console.error('Membership check error:', e);
+        }
         
         if (isMember || channel.autoAccept) {
             await db.collection('users').updateOne(
@@ -2510,7 +3043,7 @@ bot.action(/^verify_channel_(.+)$/, async (ctx) => {
                     { $set: { verified: true } }
                 );
                 
-                // Add welcome bonus if not already added
+                // Add verification bonus
                 await db.collection('transactions').insertOne({
                     userId,
                     amount: settings.welcomeBonus,
@@ -2524,7 +3057,7 @@ bot.action(/^verify_channel_(.+)$/, async (ctx) => {
                     { $inc: { balance: settings.welcomeBonus } }
                 );
                 
-                // Process referral if pending
+                // Process referral
                 const referral = await db.collection('referrals').findOne({ referredId: userId });
                 if (referral && !referral.verified) {
                     await db.collection('referrals').updateOne(
@@ -2532,7 +3065,6 @@ bot.action(/^verify_channel_(.+)$/, async (ctx) => {
                         { $set: { verified: true } }
                     );
                     
-                    // Add referral bonus to referrer
                     await db.collection('users').updateOne(
                         { userId: referral.referrerId },
                         { $inc: { balance: settings.referBonus } }
@@ -2552,9 +3084,6 @@ bot.action(/^verify_channel_(.+)$/, async (ctx) => {
             }
         } else {
             await ctx.answerCbQuery('❌ You haven\'t joined the channel yet!');
-            if (channel.link) {
-                await ctx.reply(`Please join the channel first:\n${channel.link}`);
-            }
         }
     } catch (error) {
         console.error('Channel verification error:', error);
@@ -2562,7 +3091,7 @@ bot.action(/^verify_channel_(.+)$/, async (ctx) => {
     }
 });
 
-bot.action('check_all_channels', async (ctx) => {
+bot.action('check_all', async (ctx) => {
     const userId = ctx.from.id;
     
     try {
@@ -2575,10 +3104,15 @@ bot.action('check_all_channels', async (ctx) => {
         
         for (const channel of channels) {
             if (!user.joinedChannels.includes(channel.channelId)) {
-                const isMember = await checkChannelMembership(ctx, userId, channel.channelId);
-                if (isMember || channel.autoAccept) {
-                    newlyJoined.push(channel.channelId);
-                } else {
+                try {
+                    const chatMember = await ctx.telegram.getChatMember(channel.channelId, userId);
+                    const isMember = ['member', 'administrator', 'creator'].includes(chatMember.status);
+                    if (isMember || channel.autoAccept) {
+                        newlyJoined.push(channel.channelId);
+                    } else {
+                        allJoined = false;
+                    }
+                } catch (e) {
                     allJoined = false;
                 }
             }
@@ -2641,13 +3175,14 @@ bot.action('check_all_channels', async (ctx) => {
             await ctx.answerCbQuery('❌ Please join all channels first!');
         }
     } catch (error) {
-        console.error('Check all channels error:', error);
+        console.error('Check all error:', error);
         await ctx.answerCbQuery('❌ Error checking channels');
     }
 });
 
 async function showMainMenu(ctx, user) {
     const settings = await getSettings();
+    const isAdmin = settings.adminIds.includes(ctx.from.id);
     
     const text = `
 ┌─━━━━━━━━━━━━━━━─┐
@@ -2655,25 +3190,36 @@ async function showMainMenu(ctx, user) {
 └─━━━━━━━━━━━━━━━─┘
 
 👋 Welcome, ${user.fullName || 'User'}!
-💰 Balance: ₹${user.balance}
+💰 Balance: ₹${user.balance.toFixed(2)}
 🏷️ Refer Code: ${user.referCode}
 ✅ Verified: ${user.verified ? 'Yes' : 'No'}
 
 🌟 <b>Main Menu</b>
     `;
     
+    const buttons = [
+        [Markup.button.webApp('🌐 Open Web App', `${WEB_APP_URL}/webapp?userId=${ctx.from.id}`)],
+        [
+            Markup.button.callback('🏠 Home', 'web_home'),
+            Markup.button.callback('👥 Refer', 'web_refer'),
+            Markup.button.callback('📊 History', 'web_history')
+        ]
+    ];
+    
+    if (channels.length > 1) {
+        buttons.push([Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')]);
+    }
+    
+    if (isAdmin) {
+        buttons.push([Markup.button.webApp('👑 Admin Panel', `${WEB_APP_URL}/admin?userId=${ctx.from.id}`)]);
+    }
+    
+    await ctx.reply(text, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard(buttons)
+    });
+}
 
-const buttons = [
-    [Markup.button.webApp('🌐 Open Web App', `${WEB_APP_URL}/admin?userId=${ctx.from.id}`)],
-    [
-        Markup.button.callback('🏠 Home', 'web_home'),
-        Markup.button.callback('👥 Refer', 'web_refer'),
-        Markup.button.callback('📊 History', 'web_history')
-    ],
-    [Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')]
-];
-
-const keyboard = Markup.inlineKeyboard(buttons);
 bot.action('web_home', async (ctx) => {
     const userId = ctx.from.id;
     const user = await db.collection('users').findOne({ userId });
@@ -2691,7 +3237,7 @@ bot.action('web_refer', async (ctx) => {
 👥 <b>Your Referrals</b>
 
 🔗 Referral Link:
-https://t.me/${bot.botInfo.username}?start=${user.referCode}
+https://t.me/${ctx.botInfo.username}?start=${user.referCode}
 
 💰 Earn ₹${settings.referBonus} per verified referral
 📊 Total Referrals: ${referrals.length}
@@ -2717,7 +3263,7 @@ bot.action('web_history', async (ctx) => {
     const transactions = await db.collection('transactions')
         .find({ userId })
         .sort({ createdAt: -1 })
-        .limit(10)
+        .limit(20)
         .toArray();
     
     let text = '📊 <b>Transaction History</b>\n\n';
@@ -2727,7 +3273,7 @@ bot.action('web_history', async (ctx) => {
     } else {
         transactions.forEach(tx => {
             const sign = tx.type === 'credit' ? '+' : '-';
-            text += `\n${sign} ₹${tx.amount} - ${tx.description}\n📅 ${formatIST(tx.createdAt)}\n`;
+            text += `\n${sign} ₹${tx.amount} - ${tx.description}\n📅 ${new Date(tx.createdAt).toLocaleString()}\n`;
         });
     }
     
@@ -2751,7 +3297,7 @@ bot.action('reorder_channels', async (ctx) => {
     channels.forEach((c, i) => {
         keyboard.push([{
             text: `${i + 1}. ${c.name}`,
-            callback_data: `reorder_channel_select_${c.channelId}`
+            callback_data: `reorder_select_${c._id}`
         }]);
     });
     
@@ -2760,70 +3306,24 @@ bot.action('reorder_channels', async (ctx) => {
     await safeEdit(ctx, text, Markup.inlineKeyboard(keyboard));
 });
 
-bot.action(/^reorder_channel_select_(.+)$/, async (ctx) => {
+bot.action(/^reorder_select_(.+)$/, async (ctx) => {
     const channelId = ctx.match[1];
     const channels = await db.collection('channels').find({ enabled: true }).sort({ position: 1 }).toArray();
-    const selectedIndex = channels.findIndex(c => c.channelId === channelId);
+    const selectedIndex = channels.findIndex(c => c._id.toString() === channelId);
     
-    ctx.session.reorderChannel = {
-        channelId,
-        selectedIndex,
-        channels
+    ctx.session.reorderData = {
+        channels: channels.map(c => ({ _id: c._id.toString(), name: c.name })),
+        selectedIndex
     };
     
-    let text = '🔄 <b>Reorder Channels</b>\n\n';
-    channels.forEach((c, i) => {
-        if (i === selectedIndex) {
-            text += `<blockquote>${i + 1}. ${c.name}</blockquote>\n`;
-        } else {
-            text += `${i + 1}. ${c.name}\n`;
-        }
-    });
-    
-    const keyboard = [];
-    if (selectedIndex > 0) {
-        keyboard.push([{ text: '⬆️ Move Up', callback_data: 'reorder_channel_up' }]);
-    }
-    if (selectedIndex < channels.length - 1) {
-        if (selectedIndex > 0) {
-            keyboard[keyboard.length - 1].push({ text: '⬇️ Move Down', callback_data: 'reorder_channel_down' });
-        } else {
-            keyboard.push([{ text: '⬇️ Move Down', callback_data: 'reorder_channel_down' }]);
-        }
-    }
-    keyboard.push([{ text: '✅ Save', callback_data: 'reorder_channel_save' }, { text: '🔙 Back', callback_data: 'reorder_channels' }]);
-    
-    await safeEdit(ctx, text, Markup.inlineKeyboard(keyboard));
+    await showReorderMenu(ctx);
 });
 
-bot.action('reorder_channel_up', async (ctx) => {
-    if (!ctx.session.reorderChannel) return;
+async function showReorderMenu(ctx) {
+    const data = ctx.session.reorderData;
+    if (!data) return;
     
-    const { selectedIndex, channels } = ctx.session.reorderChannel;
-    if (selectedIndex <= 0) return;
-    
-    [channels[selectedIndex], channels[selectedIndex - 1]] = [channels[selectedIndex - 1], channels[selectedIndex]];
-    ctx.session.reorderChannel.selectedIndex = selectedIndex - 1;
-    ctx.session.reorderChannel.channels = channels;
-    
-    await showReorderPreview(ctx);
-});
-
-bot.action('reorder_channel_down', async (ctx) => {
-    if (!ctx.session.reorderChannel) return;
-    
-    const { selectedIndex, channels } = ctx.session.reorderChannel;
-    if (selectedIndex >= channels.length - 1) return;
-    
-    [channels[selectedIndex], channels[selectedIndex + 1]] = [channels[selectedIndex + 1], channels[selectedIndex]];
-    ctx.session.reorderChannel.selectedIndex = selectedIndex + 1;
-    ctx.session.reorderChannel.channels = channels;
-    
-    await showReorderPreview(ctx);
-});
-
-async function showReorderPreview(ctx) {
-    const { selectedIndex, channels } = ctx.session.reorderChannel;
+    const { channels, selectedIndex } = data;
     
     let text = '🔄 <b>Reorder Channels</b>\n\n';
     channels.forEach((c, i) => {
@@ -2836,91 +3336,122 @@ async function showReorderPreview(ctx) {
     
     const keyboard = [];
     if (selectedIndex > 0) {
-        keyboard.push([{ text: '⬆️ Move Up', callback_data: 'reorder_channel_up' }]);
+        keyboard.push([{ text: '⬆️ Move Up', callback_data: 'reorder_up' }]);
     }
     if (selectedIndex < channels.length - 1) {
         if (selectedIndex > 0) {
-            keyboard[keyboard.length - 1].push({ text: '⬇️ Move Down', callback_data: 'reorder_channel_down' });
+            keyboard[keyboard.length - 1].push({ text: '⬇️ Move Down', callback_data: 'reorder_down' });
         } else {
-            keyboard.push([{ text: '⬇️ Move Down', callback_data: 'reorder_channel_down' }]);
+            keyboard.push([{ text: '⬇️ Move Down', callback_data: 'reorder_down' }]);
         }
     }
-    keyboard.push([{ text: '✅ Save', callback_data: 'reorder_channel_save' }, { text: '🔙 Back', callback_data: 'reorder_channels' }]);
+    keyboard.push([{ text: '✅ Save', callback_data: 'reorder_save' }, { text: '🔙 Back', callback_data: 'reorder_channels' }]);
     
     await safeEdit(ctx, text, Markup.inlineKeyboard(keyboard));
 }
 
-bot.action('reorder_channel_save', async (ctx) => {
-    if (!ctx.session.reorderChannel) return;
+bot.action('reorder_up', async (ctx) => {
+    const data = ctx.session.reorderData;
+    if (!data || data.selectedIndex <= 0) return;
     
-    const { channels } = ctx.session.reorderChannel;
+    const channels = data.channels;
+    [channels[data.selectedIndex], channels[data.selectedIndex - 1]] = 
+        [channels[data.selectedIndex - 1], channels[data.selectedIndex]];
+    data.selectedIndex--;
     
-    for (let i = 0; i < channels.length; i++) {
+    await showReorderMenu(ctx);
+});
+
+bot.action('reorder_down', async (ctx) => {
+    const data = ctx.session.reorderData;
+    if (!data || data.selectedIndex >= data.channels.length - 1) return;
+    
+    const channels = data.channels;
+    [channels[data.selectedIndex], channels[data.selectedIndex + 1]] = 
+        [channels[data.selectedIndex + 1], channels[data.selectedIndex]];
+    data.selectedIndex++;
+    
+    await showReorderMenu(ctx);
+});
+
+bot.action('reorder_save', async (ctx) => {
+    const data = ctx.session.reorderData;
+    if (!data) return;
+    
+    for (let i = 0; i < data.channels.length; i++) {
         await db.collection('channels').updateOne(
-            { channelId: channels[i].channelId },
+            { _id: new ObjectId(data.channels[i]._id) },
             { $set: { position: i } }
         );
     }
     
-    delete ctx.session.reorderChannel;
+    delete ctx.session.reorderData;
     await ctx.answerCbQuery('✅ Channel order saved!');
-    await showMainMenu(ctx, await db.collection('users').findOne({ userId: ctx.from.id }));
+    
+    const user = await db.collection('users').findOne({ userId: ctx.from.id });
+    await showMainMenu(ctx, user);
+});
+
+// Handle admin replies
+bot.on('text', async (ctx) => {
+    if (!ctx.message.reply_to_message) return;
+    
+    const repliedMessage = ctx.message.reply_to_message;
+    if (!repliedMessage.text || !repliedMessage.text.includes('User ID:')) return;
+    
+    const match = repliedMessage.text.match(/User ID: <code>(\d+)<\/code>/);
+    if (!match) return;
+    
+    const targetUserId = parseInt(match[1]);
+    const adminId = ctx.from.id;
+    
+    const settings = await getSettings();
+    if (!settings.adminIds.includes(adminId)) return;
+    
+    try {
+        await bot.telegram.sendMessage(targetUserId,
+            `📬 <b>Admin Response</b>\n\n${ctx.message.text}`,
+            { parse_mode: 'HTML' }
+        );
+        await ctx.reply('✅ Reply sent to user');
+    } catch (error) {
+        await ctx.reply('❌ Failed to send reply. User may have blocked the bot.');
+    }
 });
 
 // ==========================================
 // 📱 WEB APP ROUTES
 // ==========================================
-async function getSettings() {
-    const settings = {};
-    const cursor = db.collection('settings').find();
-    await cursor.forEach(doc => {
-        settings[doc.key] = doc.value;
-    });
-    return settings;
-}
-
-// Device verification middleware for web
-app.use(async (req, res, next) => {
-    const userId = req.query.userId || req.body.userId;
-    if (!userId) return next();
-    
-    try {
-        const user = await db.collection('users').findOne({ userId: parseInt(userId) });
-        if (!user) return next();
-        
-        const settings = await getSettings();
-        
-        if (settings.deviceVerification) {
-            const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-            const deviceId = generateDeviceId(req);
-            
-            if (user.deviceId && user.deviceId !== deviceId) {
-                return res.status(403).json({ error: 'Device verification failed' });
-            }
-            
-            if (user.ip && user.ip !== ip) {
-                return res.status(403).json({ error: 'IP address mismatch' });
-            }
-        }
-        
-        req.user = user;
-        next();
-    } catch (error) {
-        console.error('Device verification error:', error);
-        next();
-    }
-});
-
 app.get('/', (req, res) => {
-    res.redirect('/webapp?page=home');
+    res.redirect('/admin-login');
 });
 
 app.get('/webapp', async (req, res) => {
-    const userId = req.query.userId || req.query.startParam;
-    const page = req.query.page || 'home';
+    const userId = req.query.userId;
     
     if (!userId) {
-        return res.send('Please open from Telegram bot');
+        return res.send(`
+            <html>
+                <head>
+                    <style>
+                        body { background: #0f172a; color: white; font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                        .container { text-align: center; padding: 20px; }
+                        h1 { color: #60a5fa; }
+                        button { background: #60a5fa; color: white; border: none; padding: 15px 30px; border-radius: 10px; font-size: 16px; cursor: pointer; margin-top: 20px; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>❌ Access Denied</h1>
+                        <p>Please open this web app from the Telegram bot:</p>
+                        <p><b>@auto_vfx_bot</b></p>
+                        <button onclick="window.location.href='https://t.me/auto_vfx_bot'">
+                            Open Telegram Bot
+                        </button>
+                    </div>
+                </body>
+            </html>
+        `);
     }
     
     try {
@@ -2932,24 +3463,19 @@ app.get('/webapp', async (req, res) => {
         const settings = await getSettings();
         const channels = await db.collection('channels').find({ enabled: true }).sort({ position: 1 }).toArray();
         
-        let transactions = [];
-        let referrals = [];
+        const transactions = await db.collection('transactions')
+            .find({ userId: user.userId })
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .toArray();
         
-        if (page === 'history') {
-            transactions = await db.collection('transactions')
-                .find({ userId: user.userId })
-                .sort({ createdAt: -1 })
-                .limit(50)
-                .toArray();
-        } else if (page === 'refer') {
-            referrals = await db.collection('referrals')
-                .find({ referrerId: user.userId })
-                .sort({ joinedAt: -1 })
-                .toArray();
-        }
+        const referrals = await db.collection('referrals')
+            .find({ referrerId: user.userId })
+            .sort({ joinedAt: -1 })
+            .toArray();
         
         res.render('index', {
-            currentPage: page,
+            currentPage: 'home',
             user,
             settings,
             channels,
@@ -2962,26 +3488,35 @@ app.get('/webapp', async (req, res) => {
     }
 });
 
+app.get('/admin-login', (req, res) => {
+    res.render('admin-login');
+});
+
 app.get('/admin', async (req, res) => {
     const userId = req.query.userId;
     
     if (!userId) {
-        return res.send('Please open from Telegram bot');
+        return res.redirect('/admin-login?error=1');
     }
     
     try {
         const settings = await getSettings();
         if (!settings.adminIds.includes(parseInt(userId))) {
-            return res.send('Unauthorized');
+            return res.redirect('/admin-login?error=1');
         }
         
         const users = await db.collection('users').find().sort({ createdAt: -1 }).toArray();
         const channels = await db.collection('channels').find().sort({ position: 1 }).toArray();
         
+        // Add referral count to users
+        for (const user of users) {
+            user.referralCount = await db.collection('referrals').countDocuments({ referrerId: user.userId });
+        }
+        
         const stats = {
             totalUsers: users.length,
             verifiedUsers: users.filter(u => u.verified).length,
-            totalBalance: users.reduce((sum, u) => sum + u.balance, 0),
+            totalBalance: users.reduce((sum, u) => sum + (u.balance || 0), 0),
             pendingWithdrawals: await db.collection('withdrawals').countDocuments({ status: 'pending' }),
             activeGiftCodes: await db.collection('giftCodes').countDocuments({ expiresAt: { $gt: new Date() } }),
             totalTransactions: await db.collection('transactions').countDocuments()
@@ -2991,7 +3526,8 @@ app.get('/admin', async (req, res) => {
             users,
             channels,
             settings,
-            stats
+            stats,
+            EASEPAY_API
         });
     } catch (error) {
         console.error('Admin panel error:', error);
@@ -2999,7 +3535,9 @@ app.get('/admin', async (req, res) => {
     }
 });
 
-// API Routes
+// ==========================================
+// API ROUTES
+// ==========================================
 app.get('/api/page/:page', async (req, res) => {
     const userId = req.query.userId;
     const page = req.params.page;
@@ -3065,6 +3603,10 @@ app.post('/api/withdraw', async (req, res) => {
             return res.json({ error: 'Withdrawals are currently disabled' });
         }
         
+        if (!user.verified) {
+            return res.json({ error: 'Please join all channels first' });
+        }
+        
         if (amount < settings.minWithdraw || amount > settings.maxWithdraw) {
             return res.json({ error: 'Invalid amount range' });
         }
@@ -3103,13 +3645,23 @@ app.post('/api/withdraw', async (req, res) => {
         });
         
         // Auto withdraw if enabled
+        let paymentSuccess = false;
         if (settings.autoWithdraw && settings.upiEnabled) {
-            const success = await processAutoWithdraw(netAmount, upiId);
-            if (success) {
-                await db.collection('withdrawals').updateOne(
-                    { _id: withdrawal._id },
-                    { $set: { status: 'completed', processedAt: new Date() } }
-                );
+            try {
+                const apiUrl = EASEPAY_API
+                    .replace('{upi_id}', encodeURIComponent(upiId))
+                    .replace('{amount}', netAmount);
+                const response = await axios.get(apiUrl);
+                paymentSuccess = response.data && response.data.status === 'success';
+                
+                if (paymentSuccess) {
+                    await db.collection('withdrawals').updateOne(
+                        { _id: withdrawal._id },
+                        { $set: { status: 'completed', processedAt: new Date(), autoPaid: true } }
+                    );
+                }
+            } catch (e) {
+                console.error('Auto withdraw error:', e);
             }
         }
         
@@ -3123,13 +3675,14 @@ app.post('/api/withdraw', async (req, res) => {
                     `Tax: ₹${tax}\n` +
                     `Net: ₹${netAmount}\n` +
                     `UPI: ${upiId}\n` +
-                    `Date: ${formatIST(new Date())}`,
+                    `Status: ${paymentSuccess ? 'Auto-paid' : 'Pending'}\n` +
+                    `Date: ${new Date().toLocaleString()}`,
                     { parse_mode: 'HTML' }
                 );
             } catch (e) {}
         }
         
-        res.json({ success: true, withdrawal });
+        res.json({ success: true, autoPaid: paymentSuccess });
     } catch (error) {
         console.error('Withdraw error:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -3152,7 +3705,6 @@ app.post('/api/contact', upload.single('image'), async (req, res) => {
         
         const settings = await getSettings();
         
-        // Send to all admins
         for (const adminId of settings.adminIds) {
             try {
                 const text = 
@@ -3173,7 +3725,6 @@ app.post('/api/contact', upload.single('image'), async (req, res) => {
             } catch (e) {}
         }
         
-        // Clean up uploaded file
         if (image) {
             fs.unlinkSync(image.path);
         }
@@ -3182,34 +3733,6 @@ app.post('/api/contact', upload.single('image'), async (req, res) => {
     } catch (error) {
         console.error('Contact error:', error);
         res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Handle admin replies
-bot.on('text', async (ctx) => {
-    if (!ctx.message.reply_to_message) return;
-    
-    const repliedMessage = ctx.message.reply_to_message;
-    if (!repliedMessage.text || !repliedMessage.text.includes('User ID:')) return;
-    
-    // Extract user ID from replied message
-    const match = repliedMessage.text.match(/User ID: <code>(\d+)<\/code>/);
-    if (!match) return;
-    
-    const targetUserId = parseInt(match[1]);
-    const adminId = ctx.from.id;
-    
-    const settings = await getSettings();
-    if (!settings.adminIds.includes(adminId)) return;
-    
-    try {
-        await bot.telegram.sendMessage(targetUserId,
-            `📬 <b>Admin Response</b>\n\n${ctx.message.text}`,
-            { parse_mode: 'HTML' }
-        );
-        await ctx.reply('✅ Reply sent to user');
-    } catch (error) {
-        await ctx.reply('❌ Failed to send reply. User may have blocked the bot.');
     }
 });
 
@@ -3228,18 +3751,13 @@ app.post('/api/claim-gift', async (req, res) => {
         
         const giftCode = await db.collection('giftCodes').findOne({
             code: code.toUpperCase(),
-            expiresAt: { $gt: new Date() },
-            $or: [
-                { usedCount: { $lt: '$totalUsers' } },
-                { usedCount: { $exists: false } }
-            ]
+            expiresAt: { $gt: new Date() }
         });
         
         if (!giftCode) {
             return res.json({ error: 'Invalid or expired gift code' });
         }
         
-        // Check if user already claimed this code
         const alreadyClaimed = await db.collection('giftClaims').findOne({
             userId: user.userId,
             giftCodeId: giftCode._id
@@ -3249,18 +3767,19 @@ app.post('/api/claim-gift', async (req, res) => {
             return res.json({ error: 'You have already claimed this gift code' });
         }
         
-        // Generate random amount between min and max
+        if (giftCode.usedCount >= giftCode.totalUsers) {
+            return res.json({ error: 'Gift code has reached maximum usage' });
+        }
+        
         const amount = Math.floor(
             Math.random() * (giftCode.maxAmount - giftCode.minAmount + 1)
         ) + giftCode.minAmount;
         
-        // Add to user balance
         await db.collection('users').updateOne(
             { userId: user.userId },
             { $inc: { balance: amount } }
         );
         
-        // Record transaction
         await db.collection('transactions').insertOne({
             userId: user.userId,
             amount,
@@ -3269,7 +3788,6 @@ app.post('/api/claim-gift', async (req, res) => {
             createdAt: new Date()
         });
         
-        // Record claim
         await db.collection('giftClaims').insertOne({
             userId: user.userId,
             giftCodeId: giftCode._id,
@@ -3278,7 +3796,6 @@ app.post('/api/claim-gift', async (req, res) => {
             claimedAt: new Date()
         });
         
-        // Update gift code usage
         await db.collection('giftCodes').updateOne(
             { _id: giftCode._id },
             { $inc: { usedCount: 1 } }
@@ -3309,7 +3826,6 @@ app.post('/api/join-channel', async (req, res) => {
             return res.json({ error: 'Channel not found' });
         }
         
-        // For now, just mark as joined (actual verification happens in bot)
         await db.collection('users').updateOne(
             { userId: user.userId },
             { $addToSet: { joinedChannels: channelId } }
@@ -3339,12 +3855,34 @@ app.use('/api/admin/*', async (req, res, next) => {
     next();
 });
 
+app.post('/api/admin/upload-logo', upload.single('logo'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        
+        const fileUrl = `${WEB_APP_URL}/uploads/${req.file.filename}`;
+        
+        await db.collection('settings').updateOne(
+            { key: 'botLogo' },
+            { $set: { value: fileUrl } },
+            { upsert: true }
+        );
+        
+        res.json({ success: true, url: fileUrl });
+    } catch (error) {
+        console.error('Logo upload error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 app.get('/api/admin/withdrawals', async (req, res) => {
     const { status } = req.query;
     
     try {
+        const query = status ? { status } : {};
         const withdrawals = await db.collection('withdrawals')
-            .find(status ? { status } : {})
+            .find(query)
             .sort({ createdAt: -1 })
             .toArray();
         
@@ -3365,17 +3903,24 @@ app.post('/api/admin/withdrawals/:id/accept', async (req, res) => {
         
         const settings = await getSettings();
         
-        // Process payment via API if enabled
         let paymentSuccess = false;
         if (settings.autoWithdraw && settings.upiEnabled) {
-            paymentSuccess = await processAutoWithdraw(withdrawal.netAmount, withdrawal.upiId);
+            try {
+                const apiUrl = EASEPAY_API
+                    .replace('{upi_id}', encodeURIComponent(withdrawal.upiId))
+                    .replace('{amount}', withdrawal.netAmount);
+                const response = await axios.get(apiUrl);
+                paymentSuccess = response.data && response.data.status === 'success';
+            } catch (e) {
+                console.error('Auto withdraw error:', e);
+            }
         }
         
         await db.collection('withdrawals').updateOne(
             { _id: new ObjectId(id) },
             { 
                 $set: { 
-                    status: paymentSuccess ? 'completed' : 'pending',
+                    status: paymentSuccess ? 'completed' : 'completed',
                     processedAt: new Date(),
                     processedBy: req.body.userId,
                     paymentMethod: paymentSuccess ? 'api' : 'manual'
@@ -3383,7 +3928,6 @@ app.post('/api/admin/withdrawals/:id/accept', async (req, res) => {
             }
         );
         
-        // Notify user
         try {
             await bot.telegram.sendMessage(withdrawal.userId,
                 `✅ <b>Withdrawal ${paymentSuccess ? 'Completed' : 'Processing'}</b>\n\n` +
@@ -3415,7 +3959,6 @@ app.post('/api/admin/withdrawals/:id/reject', async (req, res) => {
             { $set: { status: 'rejected', processedAt: new Date() } }
         );
         
-        // Refund balance
         await db.collection('users').updateOne(
             { userId: withdrawal.userId },
             { $inc: { balance: withdrawal.amount } }
@@ -3429,7 +3972,6 @@ app.post('/api/admin/withdrawals/:id/reject', async (req, res) => {
             createdAt: new Date()
         });
         
-        // Notify user
         try {
             await bot.telegram.sendMessage(withdrawal.userId,
                 `❌ <b>Withdrawal Rejected</b>\n\n` +
@@ -3462,19 +4004,37 @@ app.get('/api/admin/users/:userId', async (req, res) => {
     }
 });
 
+app.get('/api/admin/users/:userId/transactions', async (req, res) => {
+    const { userId } = req.params;
+    
+    try {
+        const transactions = await db.collection('transactions')
+            .find({ userId: parseInt(userId) })
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .toArray();
+        
+        res.json(transactions);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/api/admin/users/search', async (req, res) => {
     const { q } = req.query;
     
     try {
-        const user = await db.collection('users').findOne({
+        const query = {
             $or: [
-                { userId: parseInt(q) },
-                { username: q },
+                { userId: parseInt(q) || 0 },
+                { fullName: { $regex: q, $options: 'i' } },
+                { username: { $regex: q, $options: 'i' } },
                 { referCode: q.toUpperCase() }
             ]
-        });
+        };
         
-        res.json(user);
+        const users = await db.collection('users').find(query).limit(20).toArray();
+        res.json(users);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -3502,7 +4062,6 @@ app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
             createdAt: new Date()
         });
         
-        // Notify user
         try {
             await bot.telegram.sendMessage(parseInt(userId),
                 `💰 <b>Balance Added</b>\n\n` +
@@ -3518,12 +4077,29 @@ app.post('/api/admin/users/:userId/add-balance', async (req, res) => {
     }
 });
 
+app.get('/api/admin/export-users', async (req, res) => {
+    try {
+        const users = await db.collection('users').find().toArray();
+        
+        let csv = 'User ID,Name,Username,Balance,Refer Code,Verified,Created At\n';
+        
+        users.forEach(u => {
+            csv += `${u.userId},${u.fullName || ''},${u.username || ''},${u.balance},${u.referCode},${u.verified},${u.createdAt}\n`;
+        });
+        
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=users.csv');
+        res.send(csv);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.post('/api/admin/channels', async (req, res) => {
     const channel = req.body;
     
     try {
         if (channel._id) {
-            // Update existing
             await db.collection('channels').updateOne(
                 { _id: new ObjectId(channel._id) },
                 { $set: { 
@@ -3538,7 +4114,6 @@ app.post('/api/admin/channels', async (req, res) => {
                 }}
             );
         } else {
-            // Create new
             await db.collection('channels').insertOne({
                 ...channel,
                 position: parseInt(channel.position),
@@ -3623,7 +4198,6 @@ app.post('/api/admin/gift-codes', async (req, res) => {
         const expiresAt = new Date(Date.now() + parseInt(expiryMinutes) * 60 * 1000);
         
         if (codeId) {
-            // Update existing
             await db.collection('giftCodes').updateOne(
                 { _id: new ObjectId(codeId) },
                 { $set: { 
@@ -3636,7 +4210,6 @@ app.post('/api/admin/gift-codes', async (req, res) => {
                 }}
             );
         } else {
-            // Create new
             await db.collection('giftCodes').insertOne({
                 code: code.toUpperCase(),
                 minAmount: parseFloat(minAmount),
@@ -3670,11 +4243,13 @@ app.post('/api/admin/settings', async (req, res) => {
     
     try {
         for (const [key, value] of Object.entries(settings)) {
-            await db.collection('settings').updateOne(
-                { key },
-                { $set: { value } },
-                { upsert: true }
-            );
+            if (key !== 'userId' && key !== 'botLogo') {
+                await db.collection('settings').updateOne(
+                    { key },
+                    { $set: { value } },
+                    { upsert: true }
+                );
+            }
         }
         
         res.json({ success: true });
@@ -3740,8 +4315,6 @@ app.post('/api/admin/broadcast', upload.single('image'), async (req, res) => {
                     });
                 }
                 sent++;
-                
-                // Small delay to avoid rate limits
                 await new Promise(resolve => setTimeout(resolve, 50));
             } catch (e) {
                 console.error(`Failed to send to ${user.userId}:`, e.message);
@@ -3761,11 +4334,8 @@ app.post('/api/admin/broadcast', upload.single('image'), async (req, res) => {
 // ==========================================
 // ⏰ SCHEDULED JOBS
 // ==========================================
-let autoCompleteJob;
-let statsJob;
-
 function scheduleJobs() {
-    // Check expired gift codes every hour
+    // Clean expired gift codes every hour
     schedule.scheduleJob('0 * * * *', async () => {
         try {
             await db.collection('giftCodes').deleteMany({
@@ -3777,8 +4347,8 @@ function scheduleJobs() {
         }
     });
     
-    // Send daily stats to admins at 23:59 IST
-    autoCompleteJob = schedule.scheduleJob('29 18 * * *', async () => {
+    // Send daily stats at 23:59 IST
+    schedule.scheduleJob('29 18 * * *', async () => {
         try {
             const settings = await getSettings();
             const today = new Date();
@@ -3795,7 +4365,7 @@ function scheduleJobs() {
             };
             
             const text = 
-                `📊 <b>Daily Stats (${formatIST(today)})</b>\n\n` +
+                `📊 <b>Daily Stats (${new Date().toLocaleDateString()})</b>\n\n` +
                 `👥 New Users: ${stats.newUsers}\n` +
                 `💰 Withdrawals: ${stats.withdrawals}\n` +
                 `💸 Total Withdrawn: ₹${stats.totalWithdrawn[0]?.total || 0}\n` +
@@ -3817,33 +4387,6 @@ function scheduleJobs() {
 // ==========================================
 // 🚀 START SERVER
 // ==========================================
-async function safeEdit(ctx, text, keyboard = null) {
-    try {
-        const options = { 
-            parse_mode: 'HTML',
-            ...(keyboard && { reply_markup: keyboard.reply_markup })
-        };
-        await ctx.editMessageText(text, options);
-    } catch (err) {
-        if (err.description && (
-            err.description.includes("message is not modified") || 
-            err.description.includes("message can't be edited")
-        )) {
-            try {
-                const options = { 
-                    parse_mode: 'HTML',
-                    ...(keyboard && { reply_markup: keyboard.reply_markup })
-                };
-                await ctx.reply(text, options);
-            } catch (e) { 
-                console.error('SafeEdit Reply Error:', e.message);
-            }
-            return;
-        }
-        console.error('SafeEdit Error:', err.message);
-    }
-}
-
 let isShuttingDown = false;
 
 async function start() {
@@ -3852,15 +4395,15 @@ async function start() {
             scheduleJobs();
             
             const server = app.listen(PORT, '0.0.0.0', () => {
-                console.log('🌐 Web server running on port ' + PORT);
+                console.log('🌐 Server running on port ' + PORT);
                 console.log('📱 Web URL: ' + WEB_APP_URL);
                 console.log('🤖 Bot: @auto_vfx_bot');
+                console.log('👑 Admin: ' + WEB_APP_URL + '/admin-login');
             });
             
             await bot.launch();
             console.log('✅ Bot started successfully');
             
-            // Set bot commands
             await bot.telegram.setMyCommands([
                 { command: 'start', description: 'Start the bot' }
             ]);
@@ -3876,9 +4419,6 @@ function gracefulShutdown(signal) {
     isShuttingDown = true;
     
     console.log(`🛑 ${signal} received, shutting down...`);
-    
-    if (autoCompleteJob) autoCompleteJob.cancel();
-    if (statsJob) statsJob.cancel();
     
     bot.stop(signal);
     if (client) client.close();
