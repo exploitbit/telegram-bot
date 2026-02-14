@@ -175,18 +175,20 @@ async function initializeSettings() {
 // 🛠️ UTILITY FUNCTIONS
 // ==========================================
 function generateReferCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let code = '';
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
         code += chars[Math.floor(Math.random() * chars.length)];
     }
     return code;
 }
 
-function generateDeviceId(req) {
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
-    const userAgent = req.headers['user-agent'] || 'unknown';
-    return crypto.createHash('sha256').update(ip + userAgent).digest('hex').substring(0, 32);
+function generateDeviceId(ctx) {
+    // For Telegram bot, use user ID + chat ID + timestamp to create a unique device ID
+    const userId = ctx.from.id;
+    const chatId = ctx.chat?.id || userId;
+    const timestamp = Date.now();
+    return crypto.createHash('sha256').update(`${userId}-${chatId}-${timestamp}`).digest('hex').substring(0, 32);
 }
 
 async function getSettings() {
@@ -922,7 +924,7 @@ function createEJSFiles() {
                 </div>
                 
                 <div class="gift-box">
-                    <input type="text" class="gift-input" id="giftCode" placeholder="Enter 5-digit code" maxlength="5">
+                    <input type="text" class="gift-input" id="giftCode" placeholder="Enter 6-digit code" maxlength="6">
                     <button class="claim-btn" onclick="claimGift()">Claim</button>
                 </div>
             \`;
@@ -1100,8 +1102,8 @@ function createEJSFiles() {
         
         function claimGift() {
             const code = document.getElementById('giftCode').value.toUpperCase();
-            if (code.length !== 5) {
-                showToast('Enter valid 5-digit code', 'error');
+            if (code.length !== 6) {
+                showToast('Enter valid 6-digit code', 'error');
                 return;
             }
             
@@ -1965,9 +1967,9 @@ function createEJSFiles() {
             <form id="giftForm" onsubmit="saveGiftCode(event)">
                 <input type="hidden" name="codeId" id="codeId">
                 <div class="form-group">
-                    <label>Code (5 digits)</label>
+                    <label>Code (6 digits)</label>
                     <div class="search-box">
-                        <input type="text" class="form-control" name="code" id="code" maxlength="5" pattern="[A-Z0-9]{5}" required>
+                        <input type="text" class="form-control" name="code" id="code" maxlength="6" pattern="[A-Z0-9]{6}" required>
                         <button type="button" class="btn btn-primary" onclick="generateCode()">Generate</button>
                     </div>
                 </div>
@@ -2280,7 +2282,7 @@ function createEJSFiles() {
         function generateCode() {
             const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
             let code = '';
-            for (let i = 0; i < 5; i++) {
+            for (let i = 0; i < 6; i++) {
                 code += chars[Math.floor(Math.random() * chars.length)];
             }
             document.getElementById('code').value = code;
@@ -2888,18 +2890,15 @@ bot.command('start', async (ctx) => {
         let user = await db.collection('users').findOne({ userId });
         
         if (!user) {
-            // Device verification
-            const ip = ctx.message?.chat?.id ? ctx.from.id.toString() : 'unknown';
-            const deviceId = crypto.createHash('sha256').update(ip + Date.now()).digest('hex').substring(0, 32);
+            // Generate device ID based on user ID (more reliable for Telegram)
+            const deviceId = `tg_${userId}`;
             
             const settings = await getSettings();
             
+            // Fix: Only check for exact same device ID, not IP
             if (settings.deviceVerification) {
                 const existingDevice = await db.collection('users').findOne({
-                    $or: [
-                        { deviceId },
-                        { ip }
-                    ]
+                    deviceId
                 });
                 
                 if (existingDevice) {
@@ -2921,7 +2920,6 @@ bot.command('start', async (ctx) => {
                 verified: false,
                 joinedChannels: [],
                 deviceId,
-                ip,
                 createdAt: new Date(),
                 updatedAt: new Date()
             };
@@ -3182,6 +3180,7 @@ bot.action('check_all', async (ctx) => {
 
 async function showMainMenu(ctx, user) {
     const settings = await getSettings();
+    const channels = await db.collection('channels').find({ enabled: true }).toArray(); // FIX: Define channels here
     const isAdmin = settings.adminIds.includes(ctx.from.id);
     
     const text = `
@@ -3206,7 +3205,7 @@ async function showMainMenu(ctx, user) {
         ]
     ];
     
-    if (channels.length > 1) {
+    if (channels && channels.length > 1) {
         buttons.push([Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')]);
     }
     
