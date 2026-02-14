@@ -2662,9 +2662,6 @@ async function showMainMenu(ctx, user) {
 🌟 <b>Main Menu</b>
     `;
     
-    // Add this after checking if user is admin
-const settings = await getSettings();
-const isAdmin = settings.adminIds.includes(ctx.from.id);
 
 const buttons = [
     [Markup.button.webApp('🌐 Open Web App', `${WEB_APP_URL}/webapp?userId=${ctx.from.id}`)],
@@ -2673,15 +2670,9 @@ const buttons = [
         Markup.button.callback('👥 Refer', 'web_refer'),
         Markup.button.callback('📊 History', 'web_history')
     ],
-    [Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')]
+    [Markup.button.callback('🔄 Reorder Channels', 'reorder_channels')],
+    [Markup.button.webApp('👑 Admin Panel', `${WEB_APP_URL}/admin?userId=${ctx.from.id}`)]
 ];
-
-// Add admin panel button if user is admin
-if (isAdmin) {
-    buttons.push([
-        Markup.button.webApp('👑 Admin Panel', `${WEB_APP_URL}/admin?userId=${ctx.from.id}`)
-    ]);
-}
 
 const keyboard = Markup.inlineKeyboard(buttons);
 bot.action('web_home', async (ctx) => {
