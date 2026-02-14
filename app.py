@@ -1,4 +1,4 @@
-// index.js - Complete Refer & Earn Bot with Admin Panel
+
 const { Telegraf, session: telegrafSession, Markup } = require('telegraf');
 const { MongoClient, ObjectId } = require('mongodb');
 const schedule = require('node-schedule');
